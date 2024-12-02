@@ -1,10 +1,10 @@
-    async def _plan_update(self, context: Dict[str, Any]) -> List[ModificationStep]:
-        """Plan steps for updating existing code."""
+    async def _plan_refactor(self, context: Dict[str, Any]) -> List[ModificationStep]:
+        """Plan steps for refactoring code."""
         steps = []
         target = context.get('target', '')
-        changes = context.get('changes', {})
+        refactor_type = context.get('refactor_type', '')
         
-        # Backup step
+        # Create backup
         steps.append(ModificationStep(
             type=ModificationType.ADD,
             target=f"{target}.backup",
@@ -13,26 +13,35 @@
             validation_rules=[]
         ))
         
-        # Handle import changes
-        if 'import_changes' in changes:
-            steps.append(ModificationStep(
-                type=ModificationType.UPDATE,
-                target=f"{target}_imports",
-                content=changes['import_changes'],
-                dependencies=[f"{target}.backup"],
-                validation_rules=["import_syntax", "no_conflicts"]
-            ))
+        if refactor_type == 'extract_method':
+            steps.extend(await self._plan_extract_method(context))
+        elif refactor_type == 'rename':
+            steps.extend(await self._plan_rename(context))
+        elif refactor_type == 'move':
+            steps.extend(await self._plan_move(context))
+            
+        return steps
         
-        # Main update step
-        steps.append(ModificationStep(
-            type=ModificationType.UPDATE,
-            target=target,
-            content=changes.get('main_changes', ''),
-            dependencies=[
-                f"{target}.backup",
-                f"{target}_imports" if 'import_changes' in changes else None
-            ],
-            validation_rules=["syntax", "style", "tests", "backward_compatibility"]
-        ))
+    async def _plan_extract_method(self, context: Dict[str, Any]) -> List[ModificationStep]:
+        """Plan steps for extracting a method."""
+        target = context.get('target', '')
+        new_method = context.get('new_method', {})
+        
+        steps = [
+            ModificationStep(
+                type=ModificationType.ADD,
+                target=f"{target}_new_method",
+                content=new_method.get('implementation', ''),
+                dependencies=[f"{target}.backup"],
+                validation_rules=["syntax", "style", "tests"]
+            ),
+            ModificationStep(
+                type=ModificationType.UPDATE,
+                target=target,
+                content=new_method.get('caller_changes', ''),
+                dependencies=[f"{target}_new_method"],
+                validation_rules=["syntax", "style", "tests", "backward_compatibility"]
+            )
+        ]
         
         return steps
