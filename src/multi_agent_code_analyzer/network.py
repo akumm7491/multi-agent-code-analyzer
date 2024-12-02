@@ -1,81 +1,70 @@
-from typing import Dict, Any, List, Optional
-from .agents import (
-    ArchitectAgent,
-    CodeAgent,
-    DomainAgent,
-    SecurityAgent,
-    TestingAgent,
-    DocumentationAgent,
-    DependencyAgent,
-    OrchestratorAgent
-)
-from .knowledge.graph import KnowledgeGraph
-
-class AgentNetwork:
-    """Coordinates the network of specialized agents for code analysis."""
+    async def _get_agent_context(self, agent: Any, global_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Get relevant context for a specific agent."""
+        context = global_context.copy()
+        
+        # Add agent-specific knowledge from knowledge graph
+        graph_context = await self.knowledge_graph.get_context_for_specialty(agent.specialty)
+        if graph_context:
+            context.update(graph_context)
+        
+        # Add relevant relationships
+        relationships = await self.knowledge_graph.get_relationships_for_specialty(agent.specialty)
+        if relationships:
+            context["relationships"] = relationships
+        
+        return context
     
-    def __init__(self):
-        # Initialize knowledge graph
-        self.knowledge_graph = KnowledgeGraph()
-        
-        # Initialize agents
-        self.agents: Dict[str, Any] = {
-            "architect": ArchitectAgent("architect"),
-            "code": CodeAgent("code"),
-            "domain": DomainAgent("domain"),
-            "security": SecurityAgent("security"),
-            "testing": TestingAgent("testing"),
-            "documentation": DocumentationAgent("documentation"),
-            "dependency": DependencyAgent("dependency")
-        }
-        
-        # Initialize orchestrator
-        self.orchestrator = OrchestratorAgent("orchestrator")
-        
-        # Register agents with orchestrator
-        for agent in self.agents.values():
-            self.orchestrator.register_agent(agent)
-    
-    async def process_query(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Process a query using the agent network."""
-        if context is None:
-            context = {}
-            
-        # Let orchestrator determine relevant agents
-        relevant_agents = await self.orchestrator.route_query(query)
-        
-        # Collect responses from relevant agents
-        responses = []
-        for agent in relevant_agents:
-            agent_context = await self._get_agent_context(agent, context)
-            response = await agent.process(query, agent_context)
-            responses.append(response)
-        
-        # Synthesize responses
-        final_response = await self.orchestrator.synthesize_responses(responses)
+    async def _update_knowledge(self, query: str, response: Dict[str, Any]):
+        """Update knowledge graph with new information."""
+        # Extract entities and relationships from response
+        entities = await self._extract_entities(response)
+        relationships = await self._extract_relationships(response)
         
         # Update knowledge graph
-        await self._update_knowledge(query, final_response)
-        
-        return final_response
+        for entity in entities:
+            await self.knowledge_graph.add_node(
+                entity["id"],
+                entity["type"],
+                entity["metadata"]
+            )
+            
+        for rel in relationships:
+            await self.knowledge_graph.add_relationship(
+                rel["from"],
+                rel["to"],
+                rel["type"],
+                rel["metadata"]
+            )
     
-    async def analyze_codebase(self, path: str) -> Dict[str, Any]:
-        """Analyze an entire codebase."""
-        analysis = {
-            "architecture": {},
-            "code_quality": {},
-            "security": {},
-            "testing": {},
-            "documentation": {},
-            "dependencies": {}
-        }
+    async def _extract_entities(self, response: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract entities from agent response."""
+        entities = []
         
-        # Perform initial analysis with each agent
-        for agent_type, agent in self.agents.items():
-            result = await agent.process("analyze_all", {"path": path})
-            analysis[agent_type] = result
+        # Extract based on response structure
+        if "analysis" in response:
+            for key, value in response["analysis"].items():
+                if isinstance(value, dict) and "type" in value:
+                    entities.append({
+                        "id": f"{key}_{len(entities)}",
+                        "type": value["type"],
+                        "metadata": value
+                    })
         
-        # Update knowledge graph with comprehensive analysis
-        await self._update_knowledge("full_analysis", analysis)
+        return entities
+    
+    async def _extract_relationships(self, response: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract relationships from agent response."""
+        relationships = []
         
-        return analysis
+        # Extract based on response structure
+        if "relationships" in response:
+            for rel in response["relationships"]:
+                if "from" in rel and "to" in rel:
+                    relationships.append({
+                        "from": rel["from"],
+                        "to": rel["to"],
+                        "type": rel.get("type", "related_to"),
+                        "metadata": rel.get("metadata", {})
+                    })
+        
+        return relationships
