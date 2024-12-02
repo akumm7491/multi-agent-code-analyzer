@@ -1,35 +1,40 @@
-from typing import Dict, Any, List
-from .base import BaseAgent
-
-class DocumentationAgent(BaseAgent):
-    """Agent specialized in analyzing and maintaining documentation."""
-    
-    def __init__(self, name: str):
-        super().__init__(name, specialty="documentation")
-        self.doc_requirements = {}
-        self.doc_templates = {}
-        self.doc_coverage = {}
-
-    async def process(self, query: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        response = {
-            "agent": self.name,
-            "specialty": self.specialty,
-            "analysis": {},
-            "doc_gaps": [],
-            "recommendations": []
+    async def _analyze_doc_coverage(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze documentation coverage for the codebase."""
+        coverage = {
+            "overall": 0.0,
+            "by_component": {},
+            "gaps": [],
+            "quality": {}
         }
-        
-        # Analyze documentation coverage
-        coverage = await self._analyze_doc_coverage(context)
-        if coverage:
-            response["analysis"]["coverage"] = coverage
-            response["doc_gaps"] = coverage.get("gaps", [])
 
-        return response
+        for component, metrics in self.doc_coverage.items():
+            coverage["by_component"][component] = await self._evaluate_component_docs(metrics)
+            gaps = await self._identify_doc_gaps(component, metrics)
+            coverage["gaps"].extend(gaps)
 
-    async def update_knowledge(self, new_information: Dict[str, Any]):
-        """Update documentation knowledge."""
-        if "requirements" in new_information:
-            self.doc_requirements.update(new_information["requirements"])
-        if "templates" in new_information:
-            self.doc_templates.update(new_information["templates"])
+        return coverage
+
+    async def _evaluate_component_docs(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Evaluate documentation for a specific component."""
+        return {
+            "completeness": metrics.get("completeness", 0.0),
+            "quality": metrics.get("quality", 0.0),
+            "last_updated": metrics.get("last_updated"),
+            "issues": metrics.get("issues", [])
+        }
+
+    async def _identify_doc_gaps(self, component: str, metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Identify gaps in documentation."""
+        gaps = []
+        min_completeness = 0.8
+
+        if metrics.get("completeness", 0.0) < min_completeness:
+            gaps.append({
+                "component": component,
+                "type": "incomplete_docs",
+                "current": metrics["completeness"],
+                "target": min_completeness,
+                "priority": "high"
+            })
+
+        return gaps
