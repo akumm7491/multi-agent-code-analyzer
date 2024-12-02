@@ -1,40 +1,55 @@
-from typing import Dict, Any, List
-from .base import BaseAgent
-
-class DependencyAgent(BaseAgent):
-    """Agent specialized in managing and analyzing external dependencies."""
-    
-    def __init__(self, name: str):
-        super().__init__(name, specialty="dependency")
-        self.dependency_graph = {}
-        self.version_constraints = {}
-        self.security_advisories = {}
-        
-    async def process(self, query: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        response = {
-            "agent": self.name,
-            "specialty": self.specialty,
-            "analysis": {},
+    async def _analyze_dependencies(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze project dependencies and their relationships."""
+        analysis = {
             "conflicts": [],
-            "updates_available": [],
-            "security_issues": []
+            "updates": [],
+            "security": [],
+            "graph": {}
         }
         
-        # Analyze dependencies
-        analysis = await self._analyze_dependencies(context)
-        if analysis:
-            response["analysis"] = analysis
-            response["conflicts"] = analysis.get("conflicts", [])
-            response["updates_available"] = analysis.get("updates", [])
-            response["security_issues"] = analysis.get("security", [])
+        # Build dependency graph
+        for dep, info in self.dependency_graph.items():
+            analysis["graph"][dep] = await self._analyze_single_dependency(dep, info)
             
-        return response
+            # Check for conflicts
+            conflicts = await self._check_version_conflicts(dep, info)
+            if conflicts:
+                analysis["conflicts"].extend(conflicts)
+            
+            # Check for updates
+            updates = await self._check_available_updates(dep, info)
+            if updates:
+                analysis["updates"].append(updates)
+            
+            # Check security advisories
+            security_issues = await self._check_security_issues(dep, info)
+            if security_issues:
+                analysis["security"].extend(security_issues)
+                
+        return analysis
 
-    async def update_knowledge(self, new_information: Dict[str, Any]):
-        """Update dependency knowledge."""
-        if "dependencies" in new_information:
-            self.dependency_graph.update(new_information["dependencies"])
-        if "constraints" in new_information:
-            self.version_constraints.update(new_information["constraints"])
-        if "advisories" in new_information:
-            self.security_advisories.update(new_information["advisories"])
+    async def _analyze_single_dependency(self, dep: str, info: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze a single dependency's details."""
+        return {
+            "version": info.get("version"),
+            "direct_deps": info.get("dependencies", []),
+            "constraints": self.version_constraints.get(dep, {}),
+            "is_dev_dependency": info.get("dev", False)
+        }
+
+    async def _check_version_conflicts(self, dep: str, info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Check for version conflicts with other dependencies."""
+        conflicts = []
+        constraints = self.version_constraints.get(dep, {})
+        
+        for other_dep, other_info in self.dependency_graph.items():
+            if dep != other_dep and other_dep in info.get("dependencies", []):
+                if not self._versions_compatible(info["version"], constraints):
+                    conflicts.append({
+                        "dependency": dep,
+                        "conflicting_with": other_dep,
+                        "current_version": info["version"],
+                        "required_version": constraints.get("required")
+                    })
+                    
+        return conflicts
