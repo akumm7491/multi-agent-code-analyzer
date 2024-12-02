@@ -1,62 +1,70 @@
-    async def _ensure_dependencies(self):
-        """Build dependency information if not already built."""
-        if not self.file_dependencies:
-            for file_path in self.project_root.rglob("*.py"):
-                relative_path = file_path.relative_to(self.project_root)
-                deps = await self._analyze_file_dependencies(file_path)
-                self.file_dependencies[str(relative_path)] = deps
-                
-                # Track API usage
-                apis = await self._analyze_api_usage(file_path)
-                self.api_usage[str(relative_path)] = apis
-                
-    async def _analyze_file_dependencies(self, file_path: Path) -> Dict[str, Set[str]]:
-        """Analyze dependencies for a single file."""
-        deps = {
-            'imports': set(),
-            'from_imports': set(),
-            'calls': set(),
-            'attributes': set()
-        }
+    async def _find_affected_files(self, changed_files: List[str]) -> Set[str]:
+        """Find all files affected by changes."""
+        affected = set(changed_files)
+        to_check = set(changed_files)
+        checked = set()
         
-        try:
-            with open(file_path, 'r') as f:
-                tree = ast.parse(f.read())
-                
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for name in node.names:
-                        deps['imports'].add(name.name)
-                elif isinstance(node, ast.ImportFrom):
-                    if node.module:
-                        deps['from_imports'].add(node.module)
-                elif isinstance(node, ast.Call):
-                    if isinstance(node.func, ast.Name):
-                        deps['calls'].add(node.func.id)
-                elif isinstance(node, ast.Attribute):
-                    deps['attributes'].add(node.attr)
-                    
-        except Exception as e:
-            print(f"Error analyzing {file_path}: {e}")
+        while to_check:
+            current = to_check.pop()
+            checked.add(current)
             
-        return deps
-        
-    async def _analyze_api_usage(self, file_path: Path) -> Set[str]:
-        """Analyze API usage in a file."""
-        apis = set()
-        
-        try:
-            with open(file_path, 'r') as f:
-                tree = ast.parse(f.read())
-                
-            # Look for class and function definitions that might be APIs
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
-                    if any(d.id == 'api' for d in node.decorator_list 
-                          if isinstance(d, ast.Name)):
-                        apis.add(node.name)
+            # Find files that depend on the current file
+            for file, deps in self.file_dependencies.items():
+                if current in deps['imports'] or current in deps['from_imports']:
+                    affected.add(file)
+                    if file not in checked:
+                        to_check.add(file)
                         
-        except Exception as e:
-            print(f"Error analyzing API usage in {file_path}: {e}")
+        return affected
+        
+    async def _analyze_api_impact(self, changed_files: List[str]) -> Set[str]:
+        """Analyze impact on APIs."""
+        affected_apis = set()
+        
+        for file in changed_files:
+            # Check if file contains APIs
+            if file in self.api_usage:
+                affected_apis.update(self.api_usage[file])
+                
+            # Check if file uses APIs
+            if file in self.file_dependencies:
+                deps = self.file_dependencies[file]
+                for dep_file, apis in self.api_usage.items():
+                    if dep_file in deps['imports'] or dep_file in deps['from_imports']:
+                        affected_apis.update(apis)
+                        
+        return affected_apis
+        
+    async def _calculate_impact_level(self, 
+                                    changed_files: List[str],
+                                    affected_files: Set[str],
+                                    affected_apis: Set[str]) -> ImpactLevel:
+        """Calculate the overall impact level of changes."""
+        # Start with lowest impact
+        impact = ImpactLevel.LOW
+        
+        # Check number of affected files
+        if len(affected_files) > 10:
+            impact = max(impact, ImpactLevel.MEDIUM)
+        if len(affected_files) > 25:
+            impact = max(impact, ImpactLevel.HIGH)
             
-        return apis
+        # Check API impact
+        if affected_apis:
+            impact = max(impact, ImpactLevel.MEDIUM)
+        if len(affected_apis) > 5:
+            impact = max(impact, ImpactLevel.HIGH)
+            
+        # Check critical path impact
+        if any(file in self.critical_paths for file in affected_files):
+            impact = max(impact, ImpactLevel.CRITICAL)
+            
+        return impact
+        
+    def mark_critical_path(self, file_path: str):
+        """Mark a file as being on the critical path."""
+        self.critical_paths.add(file_path)
+        
+    def is_critical_path(self, file_path: str) -> bool:
+        """Check if a file is on the critical path."""
+        return file_path in self.critical_paths
