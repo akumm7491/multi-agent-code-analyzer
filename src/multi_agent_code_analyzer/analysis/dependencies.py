@@ -1,45 +1,34 @@
-from typing import Dict, Any, List, Set
-from pathlib import Path
+from typing import Dict, List, Set
 import ast
 
 class DependencyAnalyzer:
     """Analyzes code dependencies and import relationships."""
     
     def __init__(self):
+        self.dependencies = {}
         self.import_graph = {}
-        self.function_calls = {}
-        self.class_usage = {}
         
-    async def analyze_file(self, file_path: str, content: str) -> Dict[str, Any]:
-        """Analyze dependencies in a single file."""
+    async def analyze_file(self, file_path: str, content: str):
+        """Analyze dependencies in a file."""
         try:
             tree = ast.parse(content)
             imports = await self._extract_imports(tree)
-            calls = await self._extract_function_calls(tree)
-            classes = await self._extract_class_usage(tree)
+            self.dependencies[file_path] = imports
             
-            return {
-                "imports": imports,
-                "function_calls": calls,
-                "class_usage": classes
-            }
+            # Update import graph
+            self.import_graph[file_path] = list(imports)
+            
         except SyntaxError:
-            return {"error": "Invalid syntax"}
+            self.dependencies[file_path] = set()
             
-    async def _extract_imports(self, tree: ast.AST) -> List[Dict[str, str]]:
-        """Extract all imports from the file."""
-        imports = []
+    async def _extract_imports(self, tree: ast.AST) -> Set[str]:
+        """Extract import statements from AST."""
+        imports = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for name in node.names:
-                    imports.append({
-                        "module": name.name,
-                        "alias": name.asname
-                    })
+                    imports.add(name.name)
             elif isinstance(node, ast.ImportFrom):
-                for name in node.names:
-                    imports.append({
-                        "module": f"{node.module}.{name.name}",
-                        "alias": name.asname
-                    })
+                if node.module:
+                    imports.add(node.module)
         return imports
