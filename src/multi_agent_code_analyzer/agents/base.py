@@ -16,8 +16,3 @@ class BaseAgent(ABC):
     async def update_knowledge(self, new_information: Dict[str, Any]):
         """Update the agent's knowledge base."""
         pass
-
-    @abstractmethod
-    async def collaborate(self, other_agent: 'BaseAgent', query: str) -> Dict[str, Any]:
-        """Collaborate with another agent on a query."""
-        pass

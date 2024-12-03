@@ -21,7 +21,3 @@ class KnowledgeGraph:
             return [n for n in self.graph.neighbors(node_id) 
                    if self.graph[node_id][n]['type'] == relationship_type]
         return list(self.graph.neighbors(node_id))
-
-    async def get_node_metadata(self, node_id: str) -> Dict[str, Any]:
-        """Get metadata for a specific node."""
-        return self.metadata.get(node_id, {})
