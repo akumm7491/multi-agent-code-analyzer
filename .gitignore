@@ -65,6 +65,11 @@ htmlcov/
 docker-compose.override.yml
 *.env
 !example.env
+volumes/
+data/
+*/data/
+**/volumes/
+.volumes/
 
 # Database
 *.sqlite3
