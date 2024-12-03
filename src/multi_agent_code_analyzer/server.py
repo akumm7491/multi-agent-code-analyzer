@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
@@ -8,6 +8,7 @@ import os
 from enum import Enum
 import json
 import uuid
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from multi_agent_code_analyzer.agents.agent_manager import AgentManager
 from multi_agent_code_analyzer.agents.code_analyzer import CodeAnalyzerAgent
@@ -116,6 +117,15 @@ async def verify_token(authorization: Optional[str] = Header(None)) -> str:
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Expose Prometheus metrics"""
+    return Response(
+        generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
 
 
 @app.post("/analyze/repository", response_model=TaskResponse)

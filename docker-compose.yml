@@ -49,8 +49,69 @@ services:
       retries: 3
       start_period: 40s
 
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    ports:
+      - '9090:9090'
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - mcp_network
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '-q',
+          '--tries=1',
+          '--spider',
+          'http://localhost:9090/-/healthy',
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    ports:
+      - '3001:3000'
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - mcp_network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '-q',
+          '--tries=1',
+          '--spider',
+          'http://localhost:3000/api/health',
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   neo4j:
-    image: neo4j:5.13.0
+    image: neo4j:5.11.0
     environment:
       - NEO4J_AUTH=neo4j/development_password
     ports:
@@ -159,3 +220,5 @@ volumes:
   etcd_data:
   minio_data:
   milvus_data:
+  prometheus_data:
+  grafana_data:

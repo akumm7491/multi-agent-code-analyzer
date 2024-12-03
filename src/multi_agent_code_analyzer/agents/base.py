@@ -1,5 +1,7 @@
 from typing import Dict, Any, List, Optional, Union
 import uuid
+from prometheus_client import Counter, Gauge, Histogram
+import time
 
 
 class PatternLearner:
@@ -60,11 +62,46 @@ class PatternLearner:
 class BaseAgent:
     """Base class for all agents in the system"""
 
+    # Prometheus metrics
+    TASKS_TOTAL = Counter(
+        'agent_tasks_total',
+        'Total number of tasks processed by agent',
+        ['agent_id', 'task_type']
+    )
+    TASK_DURATION = Histogram(
+        'agent_task_duration_seconds',
+        'Time spent processing tasks',
+        ['agent_id', 'task_type']
+    )
+    TASK_SUCCESS = Counter(
+        'agent_task_success_total',
+        'Number of successfully completed tasks',
+        ['agent_id', 'task_type']
+    )
+    TASK_FAILURE = Counter(
+        'agent_task_failure_total',
+        'Number of failed tasks',
+        ['agent_id', 'task_type']
+    )
+    MEMORY_USAGE = Gauge(
+        'agent_memory_usage_bytes',
+        'Memory usage of agent',
+        ['agent_id']
+    )
+    PATTERN_CONFIDENCE = Gauge(
+        'agent_pattern_confidence',
+        'Confidence level in learned patterns',
+        ['agent_id', 'pattern_type']
+    )
+
     def __init__(self, agent_id: Optional[str] = None):
         self.agent_id = agent_id or str(uuid.uuid4())
         self.pattern_learner = PatternLearner()
         self.memory = {}
         self.capabilities = []
+
+        # Initialize memory usage metric
+        self.MEMORY_USAGE.labels(agent_id=self.agent_id).set(0)
 
     async def reflect(self, action: str, result: Dict[str, Any], success: bool):
         """Reflect on an action and its result"""
@@ -72,6 +109,13 @@ class BaseAgent:
             "action": action,
             "result": result
         }, success)
+
+        # Update pattern confidence metric
+        confidence = await self.pattern_learner.get_pattern_confidence("action")
+        self.PATTERN_CONFIDENCE.labels(
+            agent_id=self.agent_id,
+            pattern_type="action"
+        ).set(confidence)
 
     async def learn(self, data: Dict[str, Any]):
         """Learn from new data"""
@@ -87,6 +131,15 @@ class BaseAgent:
             # Get task type
             task_type = context.get("type", "unknown")
 
+            # Increment task counter
+            self.TASKS_TOTAL.labels(
+                agent_id=self.agent_id,
+                task_type=task_type
+            ).inc()
+
+            # Record task duration
+            start_time = time.time()
+
             # Execute task based on type
             if task_type == "analyze":
                 result = await self._analyze(context)
@@ -97,12 +150,31 @@ class BaseAgent:
             else:
                 raise ValueError(f"Unknown task type: {task_type}")
 
+            # Record task duration
+            duration = time.time() - start_time
+            self.TASK_DURATION.labels(
+                agent_id=self.agent_id,
+                task_type=task_type
+            ).observe(duration)
+
             # Reflect on the execution
             await self.reflect(task_type, result, True)
+
+            # Increment success counter
+            self.TASK_SUCCESS.labels(
+                agent_id=self.agent_id,
+                task_type=task_type
+            ).inc()
 
             return result
 
         except Exception as e:
+            # Increment failure counter
+            self.TASK_FAILURE.labels(
+                agent_id=self.agent_id,
+                task_type=context.get("type", "unknown")
+            ).inc()
+
             # Reflect on the failure
             await self.reflect(context.get("type", "unknown"), {"error": str(e)}, False)
             raise

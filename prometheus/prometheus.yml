@@ -5,7 +5,7 @@ global:
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
-      - targets: ['prometheus:9090']
+      - targets: ['localhost:9090']
 
   - job_name: 'milvus'
     static_configs:
@@ -14,3 +14,22 @@ scrape_configs:
   - job_name: 'mcp'
     static_configs:
       - targets: ['mcp:8000']
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+    metrics_path: /metrics
+
+  - job_name: 'neo4j'
+    static_configs:
+      - targets: ['neo4j:7474']
+    metrics_path: /metrics
+
+  - job_name: 'minio'
+    static_configs:
+      - targets: ['minio:9000']
+    metrics_path: /minio/v2/metrics/cluster
+
+  - job_name: 'etcd'
+    static_configs:
+      - targets: ['etcd:12379']
