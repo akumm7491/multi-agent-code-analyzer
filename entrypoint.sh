@@ -55,8 +55,7 @@ ls -la src/multi_agent_code_analyzer/
 echo "=== Python Package Test ==="
 echo "Attempting to import package..."
 python -c "import multi_agent_code_analyzer; print('Package imported successfully')"
-python -c "from multi_agent_code_analyzer.api.main import app; print('API imported successfully')"
 
 echo "=== Starting Application ==="
 echo "Starting FastAPI application with debug logging..."
-exec python -m uvicorn multi_agent_code_analyzer.api.main:app --host 0.0.0.0 --port 8000 --log-level debug 
+exec python -m uvicorn multi_agent_code_analyzer.server:app --host 0.0.0.0 --port 8000 --log-level debug 

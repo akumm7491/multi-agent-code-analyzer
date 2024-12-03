@@ -2,6 +2,13 @@ from typing import Dict, Any, List, Optional
 import aiohttp
 from .base import Tool, ToolResult, ToolCategory
 from datetime import datetime
+import asyncio
+import base64
+import logging
+import os
+from pathlib import Path
+import tempfile
+import git
 
 
 class GitHubTool(Tool):
@@ -332,3 +339,229 @@ class GitHubTool(Tool):
                     )
             except Exception as e:
                 return ToolResult(success=False, data=None, error=str(e))
+
+
+class GithubService:
+    """Service for interacting with GitHub"""
+
+    def __init__(self, access_token: Optional[str] = None):
+        self.access_token = access_token or os.getenv("GITHUB_TOKEN")
+        self.api_base = "https://api.github.com"
+        self.headers = {
+            "Authorization": f"token {self.access_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        self.logger = logging.getLogger(__name__)
+
+    async def clone_repository(self, repo_url: str, branch: str = "main") -> str:
+        """Clone a repository to a temporary directory"""
+        try:
+            # Create temp directory
+            temp_dir = tempfile.mkdtemp()
+
+            # Add token to URL for authentication
+            if self.access_token:
+                repo_url = repo_url.replace(
+                    "https://",
+                    f"https://{self.access_token}@"
+                )
+
+            # Clone repository
+            repo = git.Repo.clone_from(
+                repo_url,
+                temp_dir,
+                branch=branch
+            )
+
+            self.logger.info(f"Cloned repository to {temp_dir}")
+            return temp_dir
+
+        except Exception as e:
+            self.logger.error(f"Failed to clone repository: {str(e)}")
+            raise
+
+    async def create_branch(self, repo_url: str, branch_name: str) -> bool:
+        """Create a new branch in the repository"""
+        try:
+            owner, repo = self._parse_repo_url(repo_url)
+            default_branch = await self._get_default_branch(owner, repo)
+
+            # Get the SHA of the default branch
+            sha = await self._get_ref_sha(owner, repo, f"heads/{default_branch}")
+
+            # Create new branch
+            async with aiohttp.ClientSession(headers=self.headers) as session:
+                url = f"{self.api_base}/repos/{owner}/{repo}/git/refs"
+                data = {
+                    "ref": f"refs/heads/{branch_name}",
+                    "sha": sha
+                }
+
+                async with session.post(url, json=data) as response:
+                    if response.status == 201:
+                        self.logger.info(f"Created branch {branch_name}")
+                        return True
+                    else:
+                        error = await response.text()
+                        self.logger.error(f"Failed to create branch: {error}")
+                        return False
+
+        except Exception as e:
+            self.logger.error(f"Failed to create branch: {str(e)}")
+            return False
+
+    async def create_pull_request(self, repo_url: str, branch: str,
+                                  title: str, body: str) -> str:
+        """Create a pull request"""
+        try:
+            owner, repo = self._parse_repo_url(repo_url)
+            default_branch = await self._get_default_branch(owner, repo)
+
+            async with aiohttp.ClientSession(headers=self.headers) as session:
+                url = f"{self.api_base}/repos/{owner}/{repo}/pulls"
+                data = {
+                    "title": title,
+                    "body": body,
+                    "head": branch,
+                    "base": default_branch
+                }
+
+                async with session.post(url, json=data) as response:
+                    if response.status == 201:
+                        result = await response.json()
+                        self.logger.info(
+                            f"Created pull request: {result['html_url']}")
+                        return result['html_url']
+                    else:
+                        error = await response.text()
+                        self.logger.error(
+                            f"Failed to create pull request: {error}")
+                        raise Exception(
+                            f"Failed to create pull request: {error}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to create pull request: {str(e)}")
+            raise
+
+    async def commit_changes(self, repo_url: str, branch: str,
+                             files: Dict[str, str], message: str) -> bool:
+        """Commit changes to files"""
+        try:
+            owner, repo = self._parse_repo_url(repo_url)
+
+            # Get the current commit SHA
+            sha = await self._get_ref_sha(owner, repo, f"heads/{branch}")
+
+            # Create blobs for each file
+            blobs = []
+            for path, content in files.items():
+                blob = await self._create_blob(owner, repo, content)
+                blobs.append((path, blob))
+
+            # Create tree
+            tree = await self._create_tree(owner, repo, sha, blobs)
+
+            # Create commit
+            commit = await self._create_commit(owner, repo, message, tree, [sha])
+
+            # Update reference
+            return await self._update_ref(owner, repo, f"heads/{branch}", commit)
+
+        except Exception as e:
+            self.logger.error(f"Failed to commit changes: {str(e)}")
+            return False
+
+    async def _get_default_branch(self, owner: str, repo: str) -> str:
+        """Get the default branch of a repository"""
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            url = f"{self.api_base}/repos/{owner}/{repo}"
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data['default_branch']
+                else:
+                    raise Exception(f"Failed to get repository info: {await response.text()}")
+
+    async def _get_ref_sha(self, owner: str, repo: str, ref: str) -> str:
+        """Get the SHA for a reference"""
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            url = f"{self.api_base}/repos/{owner}/{repo}/git/refs/{ref}"
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data['object']['sha']
+                else:
+                    raise Exception(f"Failed to get ref: {await response.text()}")
+
+    async def _create_blob(self, owner: str, repo: str, content: str) -> str:
+        """Create a blob for file content"""
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            url = f"{self.api_base}/repos/{owner}/{repo}/git/blobs"
+            data = {
+                "content": base64.b64encode(content.encode()).decode(),
+                "encoding": "base64"
+            }
+
+            async with session.post(url, json=data) as response:
+                if response.status == 201:
+                    result = await response.json()
+                    return result['sha']
+                else:
+                    raise Exception(f"Failed to create blob: {await response.text()}")
+
+    async def _create_tree(self, owner: str, repo: str,
+                           base_tree: str, blobs: List[tuple]) -> str:
+        """Create a tree with the given blobs"""
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            url = f"{self.api_base}/repos/{owner}/{repo}/git/trees"
+            data = {
+                "base_tree": base_tree,
+                "tree": [
+                    {
+                        "path": path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": blob_sha
+                    }
+                    for path, blob_sha in blobs
+                ]
+            }
+
+            async with session.post(url, json=data) as response:
+                if response.status == 201:
+                    result = await response.json()
+                    return result['sha']
+                else:
+                    raise Exception(f"Failed to create tree: {await response.text()}")
+
+    async def _create_commit(self, owner: str, repo: str,
+                             message: str, tree: str, parents: List[str]) -> str:
+        """Create a commit"""
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            url = f"{self.api_base}/repos/{owner}/{repo}/git/commits"
+            data = {
+                "message": message,
+                "tree": tree,
+                "parents": parents
+            }
+
+            async with session.post(url, json=data) as response:
+                if response.status == 201:
+                    result = await response.json()
+                    return result['sha']
+                else:
+                    raise Exception(f"Failed to create commit: {await response.text()}")
+
+    async def _update_ref(self, owner: str, repo: str, ref: str, sha: str) -> bool:
+        """Update a reference to point to a commit"""
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            url = f"{self.api_base}/repos/{owner}/{repo}/git/refs/{ref}"
+            data = {"sha": sha}
+
+            async with session.patch(url, json=data) as response:
+                return response.status == 200
+
+    def _parse_repo_url(self, repo_url: str) -> tuple:
+        """Parse owner and repo from GitHub URL"""
+        parts = repo_url.rstrip("/").split("/")
+        return parts[-2], parts[-1]

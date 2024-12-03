@@ -28,6 +28,7 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_OWNER=${GITHUB_OWNER}
       - GITHUB_REPO=${GITHUB_REPO}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       - .:/app
       - ./logs:/app/logs
@@ -49,7 +50,7 @@ services:
       start_period: 40s
 
   neo4j:
-    image: neo4j:5.11.0
+    image: neo4j:5.13.0
     environment:
       - NEO4J_AUTH=neo4j/development_password
     ports:
@@ -123,58 +124,29 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s
 
   standalone:
     image: milvusdb/milvus:v2.3.3
     command: ['milvus', 'run', 'standalone']
     environment:
-      ETCD_ENDPOINTS: etcd:2379
-      MINIO_ADDRESS: minio:9000
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-      COMMON_STORAGETYPE: local
+      - ETCD_ENDPOINTS=etcd:2379
+      - MINIO_ADDRESS=minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
     ports:
       - '19530:19530'
       - '9091:9091'
-    volumes:
-      - milvus_data:/var/lib/milvus
     depends_on:
-      etcd:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
+      - 'etcd'
+      - 'minio'
     networks:
       - mcp_network
-    restart: unless-stopped
     healthcheck:
-      test: ['CMD', 'curl', '-f', 'http://localhost:9091/metrics']
+      test: ['CMD', 'curl', '-f', 'http://localhost:9091/healthz']
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 90s
-
-  prometheus:
-    image: prom/prometheus:v2.47.2
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
-    ports:
-      - '9090:9090'
-    networks:
-      - mcp_network
-    restart: unless-stopped
-    healthcheck:
-      test: ['CMD', 'wget', '-q', '--spider', 'http://localhost:9090/-/healthy']
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+      start_period: 40s
 
 networks:
   mcp_network:
@@ -185,6 +157,5 @@ volumes:
   neo4j_logs:
   redis_data:
   etcd_data:
-  milvus_data:
-  prometheus_data:
   minio_data:
+  milvus_data:
