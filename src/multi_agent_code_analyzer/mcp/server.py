@@ -8,7 +8,10 @@ import os
 from enum import Enum
 import json
 import uuid
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, REGISTRY, Counter, Gauge
+from prometheus_client.multiprocess import MultiProcessCollector
+import time
+import psutil
 
 from multi_agent_code_analyzer.agents.agent_manager import AgentManager
 from multi_agent_code_analyzer.agents.code_analyzer import CodeAnalyzerAgent
@@ -45,6 +48,36 @@ settings = Settings()
 # Initialize services
 github_service = GithubService()
 agent_manager = AgentManager()
+
+# Initialize Prometheus metrics
+HTTP_REQUEST_COUNTER = Counter('http_requests_total', 'Total HTTP requests', [
+                               'method', 'endpoint', 'status'])
+HTTP_REQUEST_DURATION = Gauge(
+    'http_request_duration_seconds', 'HTTP request duration', ['method', 'endpoint'])
+ACTIVE_TASKS = Gauge('active_tasks', 'Number of active tasks', ['agent_type'])
+MEMORY_USAGE = Gauge('process_memory_bytes', 'Process memory usage')
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    """Middleware to track request metrics"""
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+
+    # Update metrics
+    HTTP_REQUEST_COUNTER.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status=response.status_code
+    ).inc()
+
+    HTTP_REQUEST_DURATION.labels(
+        method=request.method,
+        endpoint=request.url.path
+    ).set(duration)
+
+    return response
 
 
 class AgentType(str, Enum):
@@ -122,8 +155,17 @@ async def health_check():
 @app.get("/metrics")
 async def metrics():
     """Expose Prometheus metrics"""
+    # Update process metrics
+    MEMORY_USAGE.set(psutil.Process().memory_info().rss)
+
+    # Update active tasks
+    for agent_type in ["code_analyzer", "developer"]:
+        active_count = len(
+            [t for t in agent_manager.tasks.values() if t["status"] == "in_progress"])
+        ACTIVE_TASKS.labels(agent_type=agent_type).set(active_count)
+
     return Response(
-        generate_latest(),
+        generate_latest(REGISTRY),
         media_type=CONTENT_TYPE_LATEST
     )
 

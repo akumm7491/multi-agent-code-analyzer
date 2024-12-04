@@ -1,50 +1,44 @@
 FROM python:3.11-slim
 
-# Set working directory
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/app/src \
+    SERVICE_NAME=multi-agent-code-analyzer \
+    SERVICE_PORT=8000
+
 WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     git \
     curl \
-    wget \
+    build-essential \
+    libpq-dev \
     netcat-traditional \
     && rm -rf /var/lib/apt/lists/*
 
-# Create log directory
-RUN mkdir -p /app/logs && chmod 777 /app/logs
+# Copy requirements first to leverage Docker cache
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy only the requirements and setup files first
-COPY requirements.txt setup.py ./
+# Create necessary directories
+RUN mkdir -p /app/logs /app/data /app/src
 
-# Install dependencies and the package
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install -e .
+# Copy the rest of the application
+COPY . .
 
-# Copy the source code
-COPY src/ src/
-COPY scripts/ scripts/
-COPY tests/ tests/
-COPY entrypoint.sh .
-
-# Set environment variables
-ENV PYTHONPATH=/app/src
-ENV PYTHONUNBUFFERED=1
-ENV SERVICE_NAME=multi-agent-code-analyzer
-ENV SERVICE_PORT=8000
-ENV ENVIRONMENT=development
-ENV DEBUG=true
-ENV METRICS_ENABLED=true
-ENV LOG_LEVEL=DEBUG
-
-# Make entrypoint executable
+# Make entrypoint script executable
 RUN chmod +x /app/entrypoint.sh
 
-# Expose port
+# Expose the port the app runs on
 EXPOSE 8000
 
-# Add a healthcheck
-HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
+# Set entrypoint
 ENTRYPOINT ["/app/entrypoint.sh"] 

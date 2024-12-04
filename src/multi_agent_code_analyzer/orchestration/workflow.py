@@ -1,12 +1,26 @@
-from typing import Dict, Any, List, Optional, Callable, Awaitable
+from typing import Dict, Any, List, Optional, Set
 from enum import Enum
 from dataclasses import dataclass
 import asyncio
+import logging
+import json
 from datetime import datetime
-from .task_orchestrator import TaskOrchestrator, TaskStatus, TaskPriority
 from ..generation.code_generator import CodeGenerator
 from ..tools.manager import ToolManager
 from ..context.fastmcp_adapter import FastMCPAdapter
+from ..knowledge.graph import KnowledgeGraph
+from ..verification.verifier import VerificationService
+from ..mcp.client import MCPClient
+from prometheus_client import Counter, Gauge, Histogram
+
+# Metrics
+WORKFLOW_COUNTER = Counter(
+    'workflow_total', 'Total workflows', ['type', 'status'])
+WORKFLOW_DURATION = Histogram('workflow_duration_seconds', 'Workflow duration')
+WORKFLOW_STEPS = Gauge(
+    'workflow_steps', 'Number of workflow steps', ['workflow_id'])
+WORKFLOW_SUCCESS_RATE = Gauge(
+    'workflow_success_rate', 'Workflow success rate', ['type'])
 
 
 class WorkflowStatus(Enum):
@@ -15,6 +29,8 @@ class WorkflowStatus(Enum):
     REVIEWING = "reviewing"
     COMPLETED = "completed"
     FAILED = "failed"
+    ROLLING_BACK = "rolling_back"
+    ADAPTING = "adapting"
 
 
 class WorkflowType(Enum):
@@ -23,17 +39,23 @@ class WorkflowType(Enum):
     REFACTOR = "refactor"
     ENHANCEMENT = "enhancement"
     DOCUMENTATION = "documentation"
+    AUTONOMOUS_IMPROVEMENT = "autonomous_improvement"
+    CONTINUOUS_LEARNING = "continuous_learning"
 
 
 @dataclass
 class WorkflowStep:
     """Step in a workflow"""
     name: str
-    handler: Callable[..., Awaitable[Any]]
+    handler: Any  # Callable[..., Awaitable[Any]]
     dependencies: List[str]
     retry_count: int = 3
     timeout_seconds: int = 300
     required: bool = True
+    verification_required: bool = True
+    # Optional[Callable[..., Awaitable[Any]]]
+    rollback_handler: Optional[Any] = None
+    adaptation_rules: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -43,28 +65,50 @@ class WorkflowResult:
     status: WorkflowStatus
     artifacts: Dict[str, Any]
     metrics: Dict[str, Any]
+    learnings: List[Dict[str, Any]]
+    improvements: List[Dict[str, Any]]
     error: Optional[str] = None
 
 
 class WorkflowOrchestrator:
-    """Orchestrates development workflows"""
+    """Orchestrates development workflows with autonomous capabilities"""
 
     def __init__(
         self,
-        task_orchestrator: TaskOrchestrator,
+        knowledge_graph: KnowledgeGraph,
         code_generator: CodeGenerator,
         tool_manager: ToolManager,
         context_adapter: FastMCPAdapter,
+        verifier: VerificationService,
+        mcp_client: MCPClient,
         config: Optional[Dict[str, Any]] = None
     ):
-        self.task_orchestrator = task_orchestrator
+        self.knowledge_graph = knowledge_graph
         self.code_generator = code_generator
         self.tool_manager = tool_manager
         self.context_adapter = context_adapter
+        self.verifier = verifier
+        self.mcp_client = mcp_client
         self.config = config or {}
+
+        # Workflow tracking
         self.workflows: Dict[str, Dict[str, Any]] = {}
         self.active_workflows: Dict[str, Dict[str, Any]] = {}
         self.workflow_history: List[Dict[str, Any]] = []
+        self.improvement_suggestions: List[Dict[str, Any]] = []
+        self.learning_points: Set[str] = set()
+
+        # Metrics and monitoring
+        self.logger = logging.getLogger(__name__)
+
+        # Start autonomous processes
+        self._start_autonomous_processes()
+
+    def _start_autonomous_processes(self):
+        """Start autonomous background processes"""
+        asyncio.create_task(self._continuous_improvement_loop())
+        asyncio.create_task(self._learning_aggregation_loop())
+        asyncio.create_task(self._workflow_monitoring_loop())
 
     async def create_workflow(
         self,
@@ -72,364 +116,275 @@ class WorkflowOrchestrator:
         workflow_type: WorkflowType,
         description: str,
         steps: List[WorkflowStep],
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        autonomous: bool = False
     ) -> str:
-        """Create a new workflow"""
-        workflow_id = f"workflow_{len(self.workflows) + 1}"
-        workflow = {
-            "id": workflow_id,
-            "name": name,
-            "type": workflow_type,
-            "description": description,
-            "steps": steps,
-            "status": WorkflowStatus.PENDING,
-            "metadata": metadata or {},
-            "created_at": datetime.now(),
-            "updated_at": datetime.now()
-        }
-
-        self.workflows[workflow_id] = workflow
-        await self._store_workflow_context(workflow)
-        return workflow_id
-
-    async def _store_workflow_context(self, workflow: Dict[str, Any]):
-        """Store workflow context in FastMCP"""
-        context = FastMCPContext(
-            content=workflow["description"],
-            metadata={
-                "workflow_id": workflow["id"],
-                "name": workflow["name"],
-                "type": workflow["type"].value,
-                "status": workflow["status"].value,
-                **workflow["metadata"]
-            },
-            relationships=[]
-        )
-
-        await self.context_adapter.store_context(
-            f"workflow_{workflow['id']}",
-            context
-        )
-
-    async def _execute_step(
-        self,
-        step: WorkflowStep,
-        workflow: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Execute a workflow step with retry logic"""
-        for attempt in range(step.retry_count):
-            try:
-                result = await asyncio.wait_for(
-                    step.handler(workflow, context),
-                    timeout=step.timeout_seconds
-                )
-                return {
-                    "success": True,
-                    "data": result,
-                    "attempt": attempt + 1
-                }
-            except asyncio.TimeoutError:
-                if attempt == step.retry_count - 1:
-                    raise
-            except Exception as e:
-                if attempt == step.retry_count - 1:
-                    raise
-                await asyncio.sleep(2 ** attempt)
-
-    async def _create_feature_branch(self, workflow: Dict[str, Any]) -> bool:
-        """Create a feature branch for the workflow"""
-        branch_name = f"feature/{workflow['name'].lower().replace(' ', '-')}"
-        result = await self.tool_manager.execute_tool(
-            "GitHubTool",
-            "create_branch",
-            name=branch_name,
-            base="main"
-        )
-        return result.success
-
-    async def execute_workflow(self, workflow_id: str) -> WorkflowResult:
-        """Execute a workflow"""
-        if workflow_id not in self.workflows:
-            raise ValueError(f"Workflow {workflow_id} not found")
-
-        workflow = self.workflows[workflow_id]
-        self.active_workflows[workflow_id] = workflow
-
+        """Create a new workflow with autonomous capabilities"""
         try:
-            # Create feature branch
-            if workflow["type"] in (WorkflowType.FEATURE, WorkflowType.ENHANCEMENT):
-                await self._create_feature_branch(workflow)
+            workflow_id = f"workflow_{len(self.workflows) + 1}"
 
-            # Execute steps
-            context = {}
-            results = {}
-
-            for step in workflow["steps"]:
-                # Check dependencies
-                if not all(dep in results for dep in step.dependencies):
-                    if step.required:
-                        raise ValueError(
-                            f"Dependencies not met for step {step.name}")
-                    continue
-
-                # Execute step
-                result = await self._execute_step(step, workflow, context)
-                results[step.name] = result
-                context.update(result.get("data", {}))
-
-                # Update workflow status
-                workflow["status"] = WorkflowStatus.IN_PROGRESS
-                workflow["updated_at"] = datetime.now()
-                await self._store_workflow_context(workflow)
-
-            # Create pull request
-            if workflow["type"] != WorkflowType.DOCUMENTATION:
-                pr_result = await self.tool_manager.execute_tool(
-                    "GitHubTool",
-                    "create_pr",
-                    title=f"{workflow['type'].value}: {workflow['name']}",
-                    body=workflow["description"],
-                    head=f"feature/{workflow['name'].lower().replace(' ', '-')}",
-                    base="main"
-                )
-
-                if pr_result.success:
-                    workflow["status"] = WorkflowStatus.REVIEWING
-                else:
-                    workflow["status"] = WorkflowStatus.FAILED
-
-            else:
-                workflow["status"] = WorkflowStatus.COMPLETED
-
-            # Calculate metrics
-            metrics = {
-                "total_steps": len(workflow["steps"]),
-                "completed_steps": len(results),
-                "success_rate": sum(
-                    1 for r in results.values() if r["success"]
-                ) / len(results) if results else 0,
-                "total_attempts": sum(
-                    r["attempt"] for r in results.values()
-                ),
-                "execution_time": (
-                    datetime.now() - workflow["created_at"]
-                ).total_seconds()
-            }
-
-            return WorkflowResult(
-                success=all(r["success"] for r in results.values()),
-                status=workflow["status"],
-                artifacts=results,
-                metrics=metrics
-            )
-
-        except Exception as e:
-            workflow["status"] = WorkflowStatus.FAILED
-            return WorkflowResult(
-                success=False,
-                status=WorkflowStatus.FAILED,
-                artifacts={},
-                metrics={},
-                error=str(e)
-            )
-
-        finally:
-            workflow["updated_at"] = datetime.now()
-            await self._store_workflow_context(workflow)
-            self.workflow_history.append(workflow)
-            self.active_workflows.pop(workflow_id)
-
-    async def get_workflow_status(
-        self,
-        workflow_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """Get status of a workflow"""
-        # Check active workflows
-        if workflow_id in self.active_workflows:
-            return self.active_workflows[workflow_id]
-
-        # Check history
-        for workflow in self.workflow_history:
-            if workflow["id"] == workflow_id:
-                return workflow
-
-        return None
-
-    async def get_workflow_metrics(self) -> Dict[str, Any]:
-        """Get metrics about workflow execution"""
-        total_workflows = len(self.workflow_history)
-        successful_workflows = len([
-            w for w in self.workflow_history
-            if w["status"] == WorkflowStatus.COMPLETED
-        ])
-
-        return {
-            "total_workflows": total_workflows,
-            "successful_workflows": successful_workflows,
-            "success_rate": successful_workflows / total_workflows if total_workflows > 0 else 0,
-            "workflows_by_type": {
-                wtype.value: len([
-                    w for w in self.workflow_history
-                    if w["type"] == wtype
-                ])
-                for wtype in WorkflowType
-            },
-            "average_execution_time": sum(
-                (w["updated_at"] - w["created_at"]).total_seconds()
-                for w in self.workflow_history
-            ) / total_workflows if total_workflows > 0 else 0
-        }
-
-    def create_feature_workflow(
-        self,
-        name: str,
-        description: str,
-        language: str,
-        framework: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """Create a feature development workflow"""
-        steps = [
-            WorkflowStep(
-                name="requirements_analysis",
-                handler=self._analyze_requirements,
-                dependencies=[],
-                required=True
-            ),
-            WorkflowStep(
-                name="code_generation",
-                handler=self._generate_code,
-                dependencies=["requirements_analysis"],
-                required=True
-            ),
-            WorkflowStep(
-                name="test_generation",
-                handler=self._generate_tests,
-                dependencies=["code_generation"],
-                required=True
-            ),
-            WorkflowStep(
-                name="documentation",
-                handler=self._generate_documentation,
-                dependencies=["code_generation"],
-                required=True
-            ),
-            WorkflowStep(
-                name="code_review",
-                handler=self._review_code,
-                dependencies=["code_generation", "test_generation"],
-                required=True
-            )
-        ]
-
-        return self.create_workflow(
-            name=name,
-            workflow_type=WorkflowType.FEATURE,
-            description=description,
-            steps=steps,
-            metadata={
-                "language": language,
-                "framework": framework,
+            # Create MCP context
+            context_metadata = {
+                "workflow_id": workflow_id,
+                "name": name,
+                "description": description,
+                "autonomous": autonomous,
                 **(metadata or {})
             }
-        )
 
-    async def _analyze_requirements(
-        self,
-        workflow: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Analyze requirements for a feature"""
-        similar_contexts = await self.context_adapter.search_similar_contexts(
-            await self.context_adapter.get_embeddings(workflow["description"]),
-            limit=5,
-            min_similarity=0.7
-        )
+            mcp_context = await self.mcp_client.create_context(
+                model_id=self.config["model_id"],
+                task_type=workflow_type.value,
+                metadata=context_metadata
+            )
 
-        return {
-            "requirements": {
-                "functional": [
-                    # Extract from description
-                ],
-                "non_functional": [
-                    # Extract from best practices
-                ],
-                "similar_features": [
-                    ctx["content"] for ctx in similar_contexts
-                ]
+            workflow = {
+                "id": workflow_id,
+                "name": name,
+                "type": workflow_type,
+                "description": description,
+                "steps": steps,
+                "status": WorkflowStatus.PENDING,
+                "metadata": metadata or {},
+                "created_at": datetime.now(),
+                "updated_at": datetime.now(),
+                "mcp_context": mcp_context,
+                "autonomous": autonomous,
+                "learnings": [],
+                "improvements": [],
+                "metrics": {}
             }
-        }
 
-    async def _generate_code(
-        self,
-        workflow: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Generate code for the feature"""
-        requirements = context.get("requirements", {})
+            # Store in knowledge graph
+            await self.knowledge_graph.add_node(
+                workflow_id,
+                {
+                    "type": "workflow",
+                    "content": json.dumps(workflow),
+                    "metadata": {
+                        "workflow_type": workflow_type.value,
+                        "autonomous": autonomous
+                    }
+                },
+                "Workflow"
+            )
 
-        code = await self.code_generator.generate_code(
-            description=workflow["description"],
-            language=workflow["metadata"]["language"],
-            framework=workflow["metadata"].get("framework"),
-            metadata={
-                "workflow_id": workflow["id"],
-                "requirements": requirements
+            self.workflows[workflow_id] = workflow
+            WORKFLOW_COUNTER.labels(
+                type=workflow_type.value, status="created").inc()
+
+            # Start autonomous monitoring if enabled
+            if autonomous:
+                asyncio.create_task(
+                    self._monitor_autonomous_workflow(workflow_id))
+
+            return workflow_id
+
+        except Exception as e:
+            self.logger.error(f"Failed to create workflow: {str(e)}")
+            WORKFLOW_COUNTER.labels(
+                type=workflow_type.value, status="failed").inc()
+            raise
+
+    async def _monitor_autonomous_workflow(self, workflow_id: str):
+        """Monitor and adapt autonomous workflow"""
+        try:
+            workflow = self.workflows[workflow_id]
+
+            while workflow["status"] != WorkflowStatus.COMPLETED:
+                # Get workflow metrics
+                metrics = await self._calculate_workflow_metrics(workflow_id)
+
+                # Check for improvements
+                improvements = await self._identify_improvements(workflow_id, metrics)
+
+                if improvements:
+                    # Apply improvements
+                    await self._apply_workflow_improvements(workflow_id, improvements)
+
+                # Update learning points
+                learnings = await self._extract_workflow_learnings(workflow_id)
+                workflow["learnings"].extend(learnings)
+
+                # Sleep before next check
+                await asyncio.sleep(60)
+
+        except Exception as e:
+            self.logger.error(
+                f"Failed to monitor autonomous workflow: {str(e)}")
+
+    async def _continuous_improvement_loop(self):
+        """Continuous improvement process"""
+        try:
+            while True:
+                # Analyze all workflows
+                for workflow_id, workflow in self.workflows.items():
+                    if workflow["status"] != WorkflowStatus.COMPLETED:
+                        continue
+
+                    # Analyze workflow results
+                    analysis = await self._analyze_workflow_results(workflow_id)
+
+                    # Generate improvement suggestions
+                    suggestions = await self._generate_improvements(analysis)
+
+                    if suggestions:
+                        # Create autonomous improvement workflow
+                        await self.create_workflow(
+                            name=f"Improve {workflow['name']}",
+                            workflow_type=WorkflowType.AUTONOMOUS_IMPROVEMENT,
+                            description=f"Autonomous improvements for {workflow['name']}",
+                            steps=await self._create_improvement_steps(suggestions),
+                            metadata={
+                                "parent_workflow": workflow_id,
+                                "suggestions": suggestions
+                            },
+                            autonomous=True
+                        )
+
+                await asyncio.sleep(3600)  # Check every hour
+
+        except Exception as e:
+            self.logger.error(
+                f"Error in continuous improvement loop: {str(e)}")
+
+    async def _learning_aggregation_loop(self):
+        """Aggregate and apply learnings"""
+        try:
+            while True:
+                # Collect learnings from all workflows
+                all_learnings = []
+                for workflow in self.workflows.values():
+                    all_learnings.extend(workflow.get("learnings", []))
+
+                if all_learnings:
+                    # Analyze patterns in learnings
+                    patterns = await self._analyze_learning_patterns(all_learnings)
+
+                    # Update knowledge graph
+                    for pattern in patterns:
+                        await self.knowledge_graph.add_node(
+                            f"learning_{len(self.learning_points) + 1}",
+                            {
+                                "type": "learning",
+                                "content": json.dumps(pattern),
+                                "metadata": {
+                                    "confidence": pattern["confidence"],
+                                    "source_workflows": pattern["workflows"]
+                                }
+                            },
+                            "Learning"
+                        )
+                        self.learning_points.add(pattern["id"])
+
+                await asyncio.sleep(1800)  # Aggregate every 30 minutes
+
+        except Exception as e:
+            self.logger.error(f"Error in learning aggregation loop: {str(e)}")
+
+    async def _workflow_monitoring_loop(self):
+        """Monitor active workflows"""
+        try:
+            while True:
+                # Check all active workflows
+                for workflow_id, workflow in self.active_workflows.items():
+                    try:
+                        # Update metrics
+                        metrics = await self._calculate_workflow_metrics(workflow_id)
+                        WORKFLOW_STEPS.labels(workflow_id=workflow_id).set(
+                            len(workflow["steps"])
+                        )
+
+                        # Check for issues
+                        issues = await self._check_workflow_health(workflow_id)
+                        if issues:
+                            await self._handle_workflow_issues(workflow_id, issues)
+
+                        # Update success rate
+                        success_rate = await self._calculate_success_rate(
+                            workflow["type"]
+                        )
+                        WORKFLOW_SUCCESS_RATE.labels(
+                            type=workflow["type"].value
+                        ).set(success_rate)
+
+                    except Exception as e:
+                        self.logger.error(
+                            f"Error monitoring workflow {workflow_id}: {str(e)}"
+                        )
+
+                await asyncio.sleep(30)  # Check every 30 seconds
+
+        except Exception as e:
+            self.logger.error(f"Error in workflow monitoring loop: {str(e)}")
+
+    async def _analyze_workflow_results(self, workflow_id: str) -> Dict[str, Any]:
+        """Analyze workflow results for improvements"""
+        try:
+            workflow = self.workflows[workflow_id]
+
+            # Get workflow data from knowledge graph
+            workflow_node = await self.knowledge_graph.get_node(workflow_id)
+
+            # Analyze patterns
+            patterns = await self.knowledge_graph.analyze_patterns(
+                workflow_node["content"]
+            )
+
+            # Get related workflows
+            related = await self.knowledge_graph.find_similar_nodes(
+                workflow_id,
+                node_type="workflow"
+            )
+
+            # Analyze success patterns
+            success_patterns = await self._analyze_success_patterns(
+                workflow_id,
+                related
+            )
+
+            return {
+                "patterns": patterns,
+                "related_workflows": related,
+                "success_patterns": success_patterns,
+                "metrics": workflow.get("metrics", {})
             }
-        )
 
-        return {
-            "code": code.code,
-            "tests": code.tests,
-            "documentation": code.documentation,
-            "quality_score": code.quality_score
-        }
+        except Exception as e:
+            self.logger.error(f"Failed to analyze workflow results: {str(e)}")
+            return {}
 
-    async def _generate_tests(
-        self,
-        workflow: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Generate tests for the feature"""
-        code = context.get("code", {})
+    async def _handle_workflow_issues(self, workflow_id: str,
+                                      issues: List[Dict[str, Any]]):
+        """Handle workflow issues"""
+        try:
+            workflow = self.workflows[workflow_id]
 
-        return {
-            "unit_tests": code.get("tests", ""),
-            "integration_tests": "",  # TODO: Implement
-            "coverage": code.get("coverage", 0.0)
-        }
+            for issue in issues:
+                if issue["severity"] == "critical":
+                    # Pause workflow
+                    workflow["status"] = WorkflowStatus.ADAPTING
 
-    async def _generate_documentation(
-        self,
-        workflow: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Generate documentation for the feature"""
-        code = context.get("code", {})
+                    # Create adaptation plan
+                    adaptation_plan = await self._create_adaptation_plan(
+                        workflow_id,
+                        issue
+                    )
 
-        return {
-            "api_docs": code.get("documentation", ""),
-            "usage_examples": "",  # TODO: Implement
-            "architecture_diagram": ""  # TODO: Implement
-        }
+                    # Apply adaptations
+                    await self._apply_adaptations(workflow_id, adaptation_plan)
 
-    async def _review_code(
-        self,
-        workflow: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Review generated code"""
-        code = context.get("code", {})
+                elif issue["severity"] == "warning":
+                    # Add to improvements
+                    self.improvement_suggestions.append({
+                        "workflow_id": workflow_id,
+                        "issue": issue,
+                        "suggested_improvements": await self._suggest_improvements(
+                            workflow_id,
+                            issue
+                        )
+                    })
 
-        validation_results = await self.code_generator.validate_code(
-            code=code.get("code", ""),
-            language=workflow["metadata"]["language"],
-            requirements=context.get("requirements", {}).get("functional", [])
-        )
-
-        return {
-            "validation_results": validation_results,
-            "review_comments": [],  # TODO: Implement
-            "approved": validation_results.get("quality_score", 0) >= 0.8
-        }
+        except Exception as e:
+            self.logger.error(f"Failed to handle workflow issues: {str(e)}")
+            raise

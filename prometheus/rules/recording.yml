@@ -1,0 +1,165 @@
+groups:
+  - name: agent_metrics
+    interval: 30s
+    rules:
+      - record: agent:memory_usage:avg_5m
+        expr: avg_over_time(agent_memory_usage[5m])
+
+      - record: agent:cpu_usage:avg_5m
+        expr: avg_over_time(agent_cpu_usage[5m])
+
+      - record: agent:task_success_rate:5m
+        expr: sum(rate(agent_task_success_total[5m])) / sum(rate(agent_task_total[5m]))
+
+      - record: agent:response_time:p95_5m
+        expr: histogram_quantile(0.95, sum(rate(agent_response_time_bucket[5m])) by (le))
+
+      - record: agent:heartbeat_health:1m
+        expr: rate(agent_heartbeat_total[1m])
+
+      - record: agent:task_backlog:current
+        expr: sum(agent_task_queue_size) by (agent_type)
+
+  - name: knowledge_metrics
+    interval: 1m
+    rules:
+      - record: knowledge:update_success_rate:5m
+        expr: sum(rate(knowledge_update_success_total[5m])) / sum(rate(knowledge_update_total[5m]))
+
+      - record: knowledge:confidence:avg_5m
+        expr: avg_over_time(knowledge_confidence[5m])
+
+      - record: knowledge:graph_size:rate_5m
+        expr: rate(knowledge_graph_nodes_total[5m])
+
+      - record: knowledge:consistency_score:current
+        expr: knowledge_graph_consistency_score
+
+      - record: knowledge:update_latency:p95_5m
+        expr: histogram_quantile(0.95, sum(rate(knowledge_update_duration_bucket[5m])) by (le))
+
+  - name: collaboration_metrics
+    interval: 1m
+    rules:
+      - record: collab:session_success_rate:5m
+        expr: sum(rate(collaboration_success_total[5m])) / sum(rate(collaboration_total[5m]))
+
+      - record: collab:avg_duration:5m
+        expr: avg_over_time(collaboration_session_duration_seconds[5m])
+
+      - record: collab:active_sessions:total
+        expr: sum(collaboration_session_active)
+
+      - record: collab:deadlock_risk:current
+        expr: collaboration_deadlock_risk_score
+
+      - record: collab:participant_count:avg_5m
+        expr: avg_over_time(collaboration_participant_count[5m])
+
+  - name: mcp_metrics
+    interval: 30s
+    rules:
+      - record: mcp:request_duration:p95_5m
+        expr: histogram_quantile(0.95, sum(rate(mcp_request_duration_seconds_bucket[5m])) by (le))
+
+      - record: mcp:error_rate:5m
+        expr: sum(rate(mcp_errors_total[5m])) / sum(rate(mcp_requests_total[5m]))
+
+      - record: mcp:throughput:5m
+        expr: sum(rate(mcp_requests_total[5m]))
+
+      - record: mcp:connection_stability:5m
+        expr: avg_over_time(mcp_connected[5m])
+
+      - record: mcp:queue_latency:p95_5m
+        expr: histogram_quantile(0.95, sum(rate(mcp_queue_duration_seconds_bucket[5m])) by (le))
+
+  - name: resource_metrics
+    interval: 1m
+    rules:
+      - record: resource:usage_ratio:avg_5m
+        expr: avg_over_time(resource_usage_ratio[5m])
+
+      - record: resource:queue_size:avg_5m
+        expr: avg_over_time(task_queue_size[5m])
+
+      - record: resource:scaling_events:rate_5m
+        expr: rate(agent_scaling_operations_total[5m])
+
+      - record: resource:efficiency_score:current
+        expr: resource_efficiency_score
+
+      - record: resource:cost_efficiency:1h
+        expr: sum(resource_cost_total) / sum(tasks_completed_total)
+
+  - name: validation_metrics
+    interval: 1m
+    rules:
+      - record: validation:success_rate:5m
+        expr: sum(rate(validation_success_total[5m])) / sum(rate(validation_total[5m]))
+
+      - record: validation:confidence:avg_5m
+        expr: avg_over_time(validation_confidence[5m])
+
+      - record: validation:duration:p95_5m
+        expr: histogram_quantile(0.95, sum(rate(validation_duration_seconds_bucket[5m])) by (le))
+
+      - record: validation:accuracy:current
+        expr: validation_accuracy_score
+
+      - record: validation:false_positives:rate_5m
+        expr: rate(validation_false_positives_total[5m])
+
+  - name: performance_metrics
+    interval: 30s
+    rules:
+      - record: performance:agent_efficiency:avg_5m
+        expr: avg_over_time(agent_efficiency[5m])
+
+      - record: performance:task_completion_rate:5m
+        expr: rate(tasks_completed_total[5m])
+
+      - record: performance:resource_utilization:avg_5m
+        expr: avg_over_time(resource_utilization[5m])
+
+      - record: performance:throughput:current
+        expr: sum(rate(tasks_completed_total[5m])) by (agent_type)
+
+      - record: performance:error_density:5m
+        expr: sum(rate(task_errors_total[5m])) / sum(rate(tasks_completed_total[5m]))
+
+  - name: system_metrics
+    interval: 1m
+    rules:
+      - record: system:uptime:ratio_5m
+        expr: avg_over_time(up[5m])
+
+      - record: system:memory_pressure:avg_5m
+        expr: avg_over_time(memory_pressure[5m])
+
+      - record: system:network_errors:rate_5m
+        expr: rate(network_errors_total[5m])
+
+      - record: system:disk_pressure:current
+        expr: disk_usage_ratio
+
+      - record: system:service_health:score
+        expr: avg(up) by (job)
+
+  - name: security_metrics
+    interval: 1m
+    rules:
+      - record: security:auth_success_rate:5m
+        expr: sum(rate(authentication_success_total[5m])) / sum(rate(authentication_attempts_total[5m]))
+
+      - record: security:unauthorized_access:rate_5m
+        expr: rate(security_unauthorized_access_total[5m])
+
+      - record: security:sensitive_data_exposure:current
+        expr: sum(security_sensitive_data_exposure)
+
+      - record: security:threat_level:current
+        expr: security_threat_level
+
+      - record: security:compliance_score:current
+        expr: security_compliance_score

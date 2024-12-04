@@ -2,7 +2,35 @@ from typing import Dict, Any, List, Optional
 import os
 import logging
 import json
+from prometheus_client import Counter, Gauge, Histogram
 from .base import BaseAgent
+
+# Define Prometheus metrics
+TASK_COUNTER = Counter('agent_tasks_total',
+                       'Total number of analysis tasks', ['agent_id'])
+TASK_DURATION = Histogram('agent_task_duration_seconds',
+                          'Task duration in seconds', ['agent_id'])
+TASK_SUCCESS = Counter('agent_task_success_total',
+                       'Total number of successful tasks', ['agent_id'])
+TASK_FAILURE = Counter('agent_task_failure_total',
+                       'Total number of failed tasks', ['agent_id'])
+MEMORY_USAGE = Gauge('agent_memory_usage_bytes',
+                     'Memory usage in bytes', ['agent_id'])
+PATTERN_CONFIDENCE = Gauge('agent_pattern_confidence', 'Confidence in pattern detection', [
+                           'agent_id', 'pattern_type'])
+
+# Code quality metrics
+CODE_COVERAGE = Gauge('code_coverage_percent',
+                      'Code coverage percentage', ['package'])
+CODE_TEST_COUNT = Gauge('code_test_count', 'Number of tests', ['package'])
+CODE_COMPLEXITY = Gauge('code_complexity_score',
+                        'Code complexity score', ['package'])
+CODE_ISSUES = Counter('code_issues_total', 'Number of code issues', [
+                      'severity', 'package'])
+CODE_DEPENDENCIES = Gauge('code_dependencies_total',
+                          'Number of dependencies', ['type', 'package'])
+CODE_PATTERNS = Counter('code_patterns_detected_total',
+                        'Number of design patterns detected', ['pattern_type', 'package'])
 
 
 class CodeAnalyzerAgent(BaseAgent):
@@ -11,25 +39,38 @@ class CodeAnalyzerAgent(BaseAgent):
     def __init__(self, agent_id: Optional[str] = None):
         super().__init__(agent_id)
         self.logger = logging.getLogger(__name__)
+        TASK_COUNTER.labels(agent_id=self.agent_id)
+        MEMORY_USAGE.labels(agent_id=self.agent_id)
+        PATTERN_CONFIDENCE.labels(agent_id=self.agent_id, pattern_type="ddd")
+        PATTERN_CONFIDENCE.labels(
+            agent_id=self.agent_id, pattern_type="microservices")
+        PATTERN_CONFIDENCE.labels(
+            agent_id=self.agent_id, pattern_type="clean_architecture")
 
     async def _analyze(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze a repository"""
         try:
-            repo_path = context.get("repo_path")
-            analysis_type = context.get("analysis_type", "full")
+            TASK_COUNTER.labels(agent_id=self.agent_id).inc()
+            with TASK_DURATION.labels(agent_id=self.agent_id).time():
+                repo_path = context.get("repo_path")
+                analysis_type = context.get("analysis_type", "full")
 
-            if not repo_path or not os.path.exists(repo_path):
-                raise ValueError(f"Invalid repository path: {repo_path}")
+                if not repo_path or not os.path.exists(repo_path):
+                    raise ValueError(f"Invalid repository path: {repo_path}")
 
-            # Perform analysis based on type
-            if analysis_type == "full":
-                return await self._full_analysis(repo_path)
-            elif analysis_type == "quick":
-                return await self._quick_analysis(repo_path)
-            else:
-                raise ValueError(f"Unknown analysis type: {analysis_type}")
+                # Perform analysis based on type
+                if analysis_type == "full":
+                    result = await self._full_analysis(repo_path)
+                elif analysis_type == "quick":
+                    result = await self._quick_analysis(repo_path)
+                else:
+                    raise ValueError(f"Unknown analysis type: {analysis_type}")
+
+                TASK_SUCCESS.labels(agent_id=self.agent_id).inc()
+                return result
 
         except Exception as e:
+            TASK_FAILURE.labels(agent_id=self.agent_id).inc()
             self.logger.error(f"Analysis failed: {str(e)}")
             raise
 
@@ -270,6 +311,8 @@ class CodeAnalyzerAgent(BaseAgent):
                 }
             }
 
+            package_name = os.path.basename(repo_path)
+
             # Scan all TypeScript/JavaScript files
             for root, _, files in os.walk(repo_path):
                 for file in files:
@@ -291,6 +334,11 @@ class CodeAnalyzerAgent(BaseAgent):
                                                     "category": category,
                                                     "file": os.path.relpath(file_path, repo_path)
                                                 })
+                                                # Update Prometheus metrics
+                                                CODE_PATTERNS.labels(
+                                                    pattern_type=pattern,
+                                                    package=package_name
+                                                ).inc()
 
                                 # Check for potential patterns based on file structure
                                 if "test" in file_path:
@@ -319,6 +367,29 @@ class CodeAnalyzerAgent(BaseAgent):
                 },
                 "potential_patterns": len(patterns["potential"])
             }
+
+            # Update pattern confidence metrics
+            total_patterns = len(patterns["detected"])
+            if total_patterns > 0:
+                ddd_patterns = len(
+                    [p for p in patterns["detected"] if p["category"] == "enterprise"])
+                ms_patterns = len(
+                    [p for p in patterns["detected"] if p["category"] == "architectural"])
+                clean_patterns = len([p for p in patterns["detected"] if p["category"] in [
+                                     "creational", "structural"]])
+
+                PATTERN_CONFIDENCE.labels(
+                    agent_id=self.agent_id,
+                    pattern_type="ddd"
+                ).set(ddd_patterns / total_patterns)
+                PATTERN_CONFIDENCE.labels(
+                    agent_id=self.agent_id,
+                    pattern_type="microservices"
+                ).set(ms_patterns / total_patterns)
+                PATTERN_CONFIDENCE.labels(
+                    agent_id=self.agent_id,
+                    pattern_type="clean_architecture"
+                ).set(clean_patterns / total_patterns)
 
             return patterns
 
@@ -931,6 +1002,8 @@ class CodeAnalyzerAgent(BaseAgent):
                 "issues": []
             }
 
+            package_name = os.path.basename(repo_path)
+
             # File extensions to analyze
             code_extensions = {
                 'py': 'Python',
@@ -1005,6 +1078,10 @@ class CodeAnalyzerAgent(BaseAgent):
                                 'file': file_path,
                                 'error': str(e)
                             })
+                            CODE_ISSUES.labels(
+                                severity="error",
+                                package=package_name
+                            ).inc()
 
             # Calculate some basic metrics
             if quality_metrics['code_lines'] > 0:
@@ -1012,6 +1089,18 @@ class CodeAnalyzerAgent(BaseAgent):
                     quality_metrics['comment_lines'] / quality_metrics['code_lines'] * 100, 2)
             else:
                 quality_metrics['comment_ratio'] = 0
+
+            # Update Prometheus metrics
+            CODE_COVERAGE.labels(package=package_name).set(
+                quality_metrics['comment_ratio'])
+            CODE_TEST_COUNT.labels(package=package_name).set(
+                len([f for f in os.listdir(repo_path) if f.endswith(
+                    ('test.ts', 'spec.ts', 'test.js', 'spec.js'))])
+            )
+            CODE_COMPLEXITY.labels(package=package_name).set(
+                quality_metrics['code_lines'] /
+                max(quality_metrics['files_analyzed'], 1)
+            )
 
             return quality_metrics
 

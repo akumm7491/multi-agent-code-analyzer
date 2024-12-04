@@ -1,26 +1,47 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    SERVICE_TYPE=mcp
+
+# Install system dependencies and Neo4j's cypher-shell
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    netcat-traditional \
+    redis-tools \
+    iproute2 \
+    dnsutils \
+    iputils-ping \
+    wget \
+    gnupg \
+    && curl -fsSL https://debian.neo4j.com/neotechnology.gpg.key | apt-key add - \
+    && echo 'deb https://debian.neo4j.com stable latest' | tee /etc/apt/sources.list.d/neo4j.list \
+    && apt-get update \
+    && apt-get install -y cypher-shell \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements and install dependencies
 COPY requirements.txt .
+
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
-COPY src/ /app/src/
-COPY scripts/ /app/scripts/
+RUN mkdir -p /app/logs /app/data
 
-# Install our package in development mode
-RUN pip install -e /app/src/
+COPY . .
 
-# Set environment variables
-ENV PYTHONPATH=/app/src
-ENV PYTHONUNBUFFERED=1
+COPY entrypoint.mcp.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh && \
+    chmod -R 755 /app/src && \
+    cd /app/src && \
+    pip install -e .
 
-# Run the MCP server
-CMD ["uvicorn", "multi_agent_code_analyzer.context.fastmcp_adapter:app", "--host", "0.0.0.0", "--port", "8000"] 
+EXPOSE 50051
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:50051/health || exit 1
+
+ENTRYPOINT ["/app/entrypoint.sh"]

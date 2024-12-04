@@ -1,0 +1,64 @@
+{{ define "slack.default.title" }}
+[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}
+{{ end }}
+
+{{ define "slack.default.text" }}
+{{ if gt (len .Alerts.Firing) 0 }}
+*Alerts Firing:*
+{{ range .Alerts.Firing }}
+• Instance: {{ .Labels.instance }}
+  - Severity: {{ .Labels.severity }}
+  - Summary: {{ .Annotations.summary }}
+  - Description: {{ .Annotations.description }}
+  - Started: {{ .StartsAt | since }}
+{{ if .Labels.agent_type }}  - Agent Type: {{ .Labels.agent_type }}{{ end }}
+{{ if .Labels.job }}  - Job: {{ .Labels.job }}{{ end }}
+{{ if .Value }}  - Value: {{ .Value }}{{ end }}
+{{ end }}
+{{ end }}
+
+{{ if gt (len .Alerts.Resolved) 0 }}
+*Alerts Resolved:*
+{{ range .Alerts.Resolved }}
+• Instance: {{ .Labels.instance }}
+  - Severity: {{ .Labels.severity }}
+  - Summary: {{ .Annotations.summary }}
+  - Resolved: {{ .EndsAt | since }}
+{{ end }}
+{{ end }}
+{{ end }}
+
+{{ define "slack.default.footer" }}
+{{ if gt (len .Alerts.Firing) 0 }}
+*Actions Required:*
+{{ range .Alerts.Firing }}
+{{ if eq .Labels.severity "critical" }}
+• Immediate investigation needed
+• Escalate if not resolved within 30 minutes
+{{ else if eq .Labels.severity "warning" }}
+• Monitor situation
+• Investigate if persists for more than 15 minutes
+{{ end }}
+{{ end }}
+{{ end }}
+
+Prometheus: {{ template "__alertmanager" . }}
+{{ end }}
+
+{{ define "__alertmanager" }}
+{{- if .ExternalURL -}}
+    <{{ .ExternalURL }}|Prometheus>
+{{- else -}}
+    <http://localhost:9090|Prometheus>
+{{- end -}}
+{{ end }}
+
+{{ define "slack.custom.title_link" }}
+{{- if .CommonAnnotations.runbook_url -}}
+    {{ .CommonAnnotations.runbook_url }}
+{{- else if .CommonAnnotations.dashboard_url -}}
+    {{ .CommonAnnotations.dashboard_url }}
+{{- else -}}
+    {{ template "__alertmanager" . }}
+{{- end -}}
+{{ end }} 

@@ -1,35 +1,79 @@
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
+  scrape_timeout: 10s
+
+# Rule files for alerting and recording rules
+rule_files:
+  - "rules/alerts.yml"
+  - "rules/recording.yml"
 
 scrape_configs:
+  # Core Services
   - job_name: 'prometheus'
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['prometheus:9090']
+    metrics_path: '/metrics'
 
-  - job_name: 'milvus'
+  - job_name: 'code-analyzer'
     static_configs:
-      - targets: ['standalone:9091']
+      - targets: ['app:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: app
+      - target_label: service
+        replacement: 'code_analyzer'
 
-  - job_name: 'mcp'
+  # Infrastructure Services
+  - job_name: 'neo4j'
     static_configs:
-      - targets: ['mcp:8000']
+      - targets: ['neo4j:7474']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    relabel_configs:
+      - target_label: service
+        replacement: 'neo4j'
 
   - job_name: 'redis'
     static_configs:
       - targets: ['redis:6379']
-    metrics_path: /metrics
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    relabel_configs:
+      - target_label: service
+        replacement: 'redis'
 
-  - job_name: 'neo4j'
+  - job_name: 'milvus'
     static_configs:
-      - targets: ['neo4j:7474']
-    metrics_path: /metrics
+      - targets: ['milvus:9091']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    relabel_configs:
+      - target_label: service
+        replacement: 'milvus'
 
-  - job_name: 'minio'
+  # Performance and Resource Metrics
+  - job_name: 'task_performance'
     static_configs:
-      - targets: ['minio:9000']
-    metrics_path: /minio/v2/metrics/cluster
+      - targets: ['app:8000']
+    metrics_path: '/metrics/performance'
+    scrape_interval: 10s
+    metric_relabel_configs:
+      - source_labels: [task_type]
+        target_label: type
+      - target_label: service
+        replacement: 'task_performance'
 
-  - job_name: 'etcd'
+  # Health and Diagnostics
+  - job_name: 'health'
     static_configs:
-      - targets: ['etcd:12379']
+      - targets: ['app:8000']
+    metrics_path: '/metrics/health'
+    scrape_interval: 10s
+    metric_relabel_configs:
+      - source_labels: [service]
+        target_label: component
+      - target_label: service
+        replacement: 'health'
