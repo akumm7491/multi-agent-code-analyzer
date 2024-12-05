@@ -1,192 +1,140 @@
-from typing import Dict, Any, List, Optional, Union
-import uuid
-from prometheus_client import Counter, Gauge, Histogram
-import time
+from typing import Dict, Any, Optional, List
+import asyncio
+from uuid import UUID, uuid4
+from datetime import datetime
+import logging
+from abc import ABC, abstractmethod
+
+from ..learning.memory import MemoryManager
+from ..mcp.models import Context, ContextType
+from ..core.mcp_client import MCPClient
+
+logger = logging.getLogger(__name__)
 
 
-class PatternLearner:
-    """A class for learning patterns from agent interactions"""
+class BaseAgent(ABC):
+    def __init__(
+        self,
+        agent_id: Optional[str] = None,
+        mcp_client: Optional[MCPClient] = None,
+        memory_manager: Optional[MemoryManager] = None
+    ):
+        self.agent_id = agent_id or str(uuid4())
+        self.mcp_client = mcp_client or MCPClient()
+        self.memory_manager = memory_manager or MemoryManager()
+        self.current_task: Optional[Dict[str, Any]] = None
+        self.context_history: List[UUID] = []
+        self.max_context_length = int(
+            os.getenv("MCP_MAX_CONTEXT_LENGTH", "100000"))
 
-    def __init__(self):
-        self.patterns = {}
-        self.pattern_confidence = {}
+    async def initialize(self):
+        """Initialize agent components"""
+        await self.memory_manager.initialize()
+        await self.mcp_client.connect()
 
-    async def learn_pattern(self, pattern_type: str, pattern_data: Dict[str, Any], success: bool):
-        """Learn a pattern from an interaction"""
-        if pattern_type not in self.patterns:
-            self.patterns[pattern_type] = []
-            self.pattern_confidence[pattern_type] = 1.0
-
-        self.patterns[pattern_type].append(pattern_data)
-
-        # Adjust confidence based on success/failure
-        if success:
-            self.pattern_confidence[pattern_type] *= 1.1
-        else:
-            self.pattern_confidence[pattern_type] *= 0.9
-
-        # Keep confidence in reasonable bounds
-        self.pattern_confidence[pattern_type] = max(
-            0.1, min(2.0, self.pattern_confidence[pattern_type]))
-
-    async def get_pattern_confidence(self, pattern_type: str) -> float:
-        return self.pattern_confidence.get(pattern_type, 1.0)
-
-    async def get_similar_patterns(self, pattern_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        similar_patterns = []
-        for pattern_type, patterns in self.patterns.items():
-            for pattern in patterns:
-                if await self._calculate_similarity(pattern, pattern_data) > 0.7:
-                    similar_patterns.append({
-                        "type": pattern_type,
-                        "pattern": pattern,
-                        "confidence": self.pattern_confidence[pattern_type]
-                    })
-        return similar_patterns
-
-    async def _calculate_similarity(self, pattern1: Dict[str, Any], pattern2: Dict[str, Any]) -> float:
-        """Calculate similarity between two patterns"""
-        # Simple implementation - can be enhanced with more sophisticated metrics
-        common_keys = set(pattern1.keys()) & set(pattern2.keys())
-        if not common_keys:
-            return 0.0
-
-        similarity = 0.0
-        for key in common_keys:
-            if pattern1[key] == pattern2[key]:
-                similarity += 1.0
-
-        return similarity / len(common_keys)
-
-
-class BaseAgent:
-    """Base class for all agents in the system"""
-
-    # Prometheus metrics
-    TASKS_TOTAL = Counter(
-        'agent_tasks_total',
-        'Total number of tasks processed by agent',
-        ['agent_id', 'task_type']
-    )
-    TASK_DURATION = Histogram(
-        'agent_task_duration_seconds',
-        'Time spent processing tasks',
-        ['agent_id', 'task_type']
-    )
-    TASK_SUCCESS = Counter(
-        'agent_task_success_total',
-        'Number of successfully completed tasks',
-        ['agent_id', 'task_type']
-    )
-    TASK_FAILURE = Counter(
-        'agent_task_failure_total',
-        'Number of failed tasks',
-        ['agent_id', 'task_type']
-    )
-    MEMORY_USAGE = Gauge(
-        'agent_memory_usage_bytes',
-        'Memory usage of agent',
-        ['agent_id']
-    )
-    PATTERN_CONFIDENCE = Gauge(
-        'agent_pattern_confidence',
-        'Confidence level in learned patterns',
-        ['agent_id', 'pattern_type']
-    )
-
-    def __init__(self, agent_id: Optional[str] = None):
-        self.agent_id = agent_id or str(uuid.uuid4())
-        self.pattern_learner = PatternLearner()
-        self.memory = {}
-        self.capabilities = []
-
-        # Initialize memory usage metric
-        self.MEMORY_USAGE.labels(agent_id=self.agent_id).set(0)
-
-    async def reflect(self, action: str, result: Dict[str, Any], success: bool):
-        """Reflect on an action and its result"""
-        await self.pattern_learner.learn_pattern("action", {
-            "action": action,
-            "result": result
-        }, success)
-
-        # Update pattern confidence metric
-        confidence = await self.pattern_learner.get_pattern_confidence("action")
-        self.PATTERN_CONFIDENCE.labels(
-            agent_id=self.agent_id,
-            pattern_type="action"
-        ).set(confidence)
-
-    async def learn(self, data: Dict[str, Any]):
-        """Learn from new data"""
-        pass
-
-    async def adapt(self, feedback: Dict[str, Any]):
-        """Adapt behavior based on feedback"""
-        pass
-
-    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a task with the given context"""
+    async def process_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Process a task and return the result"""
         try:
-            # Get task type
-            task_type = context.get("type", "unknown")
+            self.current_task = task
 
-            # Increment task counter
-            self.TASKS_TOTAL.labels(
-                agent_id=self.agent_id,
-                task_type=task_type
-            ).inc()
+            # Create task context
+            context = await self._create_task_context(task)
+            self.context_history.append(context.id)
 
-            # Record task duration
-            start_time = time.time()
+            # Get relevant memories
+            relevant_memories = await self._get_relevant_memories(context)
 
-            # Execute task based on type
-            if task_type == "analyze":
-                result = await self._analyze(context)
-            elif task_type == "implement":
-                result = await self._implement(context)
-            elif task_type == "custom":
-                result = await self._custom_task(context)
-            else:
-                raise ValueError(f"Unknown task type: {task_type}")
+            # Process task with context and memories
+            result = await self._execute_task(task, context, relevant_memories)
 
-            # Record task duration
-            duration = time.time() - start_time
-            self.TASK_DURATION.labels(
-                agent_id=self.agent_id,
-                task_type=task_type
-            ).observe(duration)
+            # Store task result in memory
+            await self._store_task_result(task, result, context)
 
-            # Reflect on the execution
-            await self.reflect(task_type, result, True)
-
-            # Increment success counter
-            self.TASK_SUCCESS.labels(
-                agent_id=self.agent_id,
-                task_type=task_type
-            ).inc()
-
+            self.current_task = None
             return result
 
         except Exception as e:
-            # Increment failure counter
-            self.TASK_FAILURE.labels(
-                agent_id=self.agent_id,
-                task_type=context.get("type", "unknown")
-            ).inc()
-
-            # Reflect on the failure
-            await self.reflect(context.get("type", "unknown"), {"error": str(e)}, False)
+            logger.error(f"Task processing failed: {e}", exc_info=True)
             raise
 
-    async def _analyze(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze a repository"""
-        raise NotImplementedError("Subclasses must implement _analyze()")
+    async def _create_task_context(self, task: Dict[str, Any]) -> Context:
+        """Create context for the current task"""
+        context = Context(
+            id=uuid4(),
+            type=ContextType.SYSTEM,
+            content=self._format_task_context(task),
+            metadata={
+                "agent_id": self.agent_id,
+                "task_id": task.get("id"),
+                "task_type": task.get("type"),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
 
-    async def _implement(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Implement a feature or fix"""
-        raise NotImplementedError("Subclasses must implement _implement()")
+        await self.mcp_client.store_context(context)
+        return context
 
-    async def _custom_task(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a custom task"""
-        raise NotImplementedError("Subclasses must implement _custom_task()")
+    def _format_task_context(self, task: Dict[str, Any]) -> str:
+        """Format task data into context string"""
+        return f"""Task ID: {task.get('id')}
+Type: {task.get('type')}
+Description: {task.get('description')}
+Input Data: {task.get('input_data')}
+Timestamp: {datetime.utcnow().isoformat()}"""
+
+    async def _get_relevant_memories(self, context: Context) -> List[Dict[str, Any]]:
+        """Retrieve relevant memories for the current context"""
+        query_result = await self.mcp_client.query_contexts(
+            text=context.content,
+            context_type=context.type,
+            top_k=5,
+            threshold=0.7
+        )
+        return query_result
+
+    @abstractmethod
+    async def _execute_task(
+        self,
+        task: Dict[str, Any],
+        context: Context,
+        memories: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Execute the task using context and memories"""
+        pass
+
+    async def _store_task_result(
+        self,
+        task: Dict[str, Any],
+        result: Dict[str, Any],
+        context: Context
+    ):
+        """Store task result in memory"""
+        result_context = Context(
+            id=uuid4(),
+            type=ContextType.SYSTEM,
+            content=self._format_result_context(task, result),
+            metadata={
+                "agent_id": self.agent_id,
+                "task_id": task.get("id"),
+                "task_type": task.get("type"),
+                "result_type": result.get("type"),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+
+        await self.mcp_client.store_context(result_context)
+        self.context_history.append(result_context.id)
+
+    def _format_result_context(self, task: Dict[str, Any], result: Dict[str, Any]) -> str:
+        """Format task result into context string"""
+        return f"""Task ID: {task.get('id')}
+Type: {task.get('type')}
+Result Type: {result.get('type')}
+Status: {result.get('status')}
+Output: {result.get('output')}
+Timestamp: {datetime.utcnow().isoformat()}"""
+
+    async def cleanup(self):
+        """Cleanup agent resources"""
+        await self.memory_manager.close()
+        await self.mcp_client.close()

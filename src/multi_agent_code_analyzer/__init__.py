@@ -1,5 +1,3 @@
-"""
-Multi Agent Code Analyzer - A system for analyzing and managing code with multiple agents.
-"""
+"""Multi-Agent Code Analyzer package."""
 
 __version__ = "0.1.0"

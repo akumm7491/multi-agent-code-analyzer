@@ -1,0 +1,65 @@
+common:
+  security:
+    enabled: false
+  embedded:
+    etcd:
+      enabled: true
+      use_memory_mode: false
+      data_dir: /var/lib/milvus/etcd
+      cluster:
+        listen_peer_urls: ["http://0.0.0.0:3381"]
+        listen_client_urls: ["http://0.0.0.0:3382"]
+        advertise_client_urls: ["http://localhost:3382"]
+        advertise_peer_urls: ["http://localhost:3381"]
+        initial_advertise_peer_urls: ["http://localhost:3381"]
+        initial_cluster: "default=http://localhost:3381"
+        initial_cluster_state: "new"
+        initial_cluster_token: "milvus-etcd-cluster"
+        name: "default"
+      max_snapshots: 5
+      max_wals: 5
+      quota_size: 8589934592
+
+storage:
+  type: minio
+  minio:
+    address: minio:9000
+    access_key: ${MINIO_ROOT_USER}
+    secret_key: ${MINIO_ROOT_PASSWORD}
+    bucket_name: milvus-bucket
+
+cache:
+  cache_size: 4GB
+
+msgChannel:
+  type: rocksmq
+  rocksmq:
+    path: /var/lib/milvus/rdb_data
+
+quotaCenter:
+  enabled: false
+
+log:
+  level: debug
+  file:
+    max_size: 300
+    max_age: 10
+    max_backups: 20
+
+system:
+  deployment_mode: standalone
+
+proxy:
+  port: 19531
+
+rootcoord:
+  port: 19532
+
+datacoord:
+  port: 19533
+
+querycoord:
+  port: 19534
+
+indexcoord:
+  port: 19535

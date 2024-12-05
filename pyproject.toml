@@ -1,24 +1,27 @@
-[tool.poetry]
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
 name = "multi-agent-code-analyzer"
 version = "0.1.0"
-description = "A multi-agent system for analyzing and understanding large codebases"
-authors = ["Your Name <your.email@example.com>"]
+authors = [
+    { name="Adam Kumm", email="akumm7491@gmail.com" },
+]
+description = "A system for analyzing code using multiple agents"
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 
-[tool.poetry.dependencies]
-python = "^3.9"
-langchain = "^0.0.184"
-openai = "^0.27.0"
-networkx = "^3.0"
-fastapi = "^0.95.0"
-uvicorn = "^0.21.0"
-pydantic = "^1.10.7"
+[project.urls]
+"Homepage" = "https://github.com/akumm7491/multi-agent-code-analyzer"
+"Bug Tracker" = "https://github.com/akumm7491/multi-agent-code-analyzer/issues"
 
-[tool.poetry.dev-dependencies]
-pytest = "^7.3.1"
-black = "^23.3.0"
-isort = "^5.12.0"
-flake8 = "^6.0.0"
-
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["multi_agent_code_analyzer*"]
+namespaces = false

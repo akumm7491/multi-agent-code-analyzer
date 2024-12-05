@@ -5,17 +5,15 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONPATH=/app/src \
-    SERVICE_NAME=multi-agent-code-analyzer \
-    SERVICE_PORT=8000
+    PYTHONPATH=/app
 
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    curl \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
+    git \
     libpq-dev \
     netcat-traditional \
     && rm -rf /var/lib/apt/lists/*
@@ -25,12 +23,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Create necessary directories
-RUN mkdir -p /app/logs /app/data /app/src
+RUN mkdir -p /app/logs /app/data
 
-# Copy the rest of the application
-COPY . .
+# Copy application code
+COPY src/ ./src/
 
 # Make entrypoint script executable
+COPY entrypoint.sh .
 RUN chmod +x /app/entrypoint.sh
 
 # Expose the port the app runs on

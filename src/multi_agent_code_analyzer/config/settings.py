@@ -1,212 +1,89 @@
-from typing import Optional, Dict, Any
+"""Settings module for the application."""
+
 from pydantic_settings import BaseSettings
-from pydantic import Field, validator
-from functools import lru_cache
+from typing import List
 import os
-from enum import Enum
+from dotenv import load_dotenv
 
-
-class Environment(str, Enum):
-    DEVELOPMENT = "development"
-    TESTING = "testing"
-    PRODUCTION = "production"
-
-
-class DatabaseSettings(BaseSettings):
-    NEO4J_URI: str = Field(default="bolt://localhost:7687")
-    NEO4J_USER: str = Field(default="neo4j")
-    NEO4J_PASSWORD: str = Field(default="password")
-    REDIS_URI: str = Field(default="redis://localhost:6379")
-    REDIS_PASSWORD: str = Field(default="your_redis_password")
-
-    class Config:
-        env_file = ".env"
-        extra = "allow"
-
-
-class VectorDBSettings(BaseSettings):
-    MILVUS_HOST: str = Field(default="localhost")
-    MILVUS_PORT: int = Field(default=19530)
-    COLLECTION_NAME: str = Field(default="mcp_contexts")
-    VECTOR_DIM: int = Field(default=384)
-
-    class Config:
-        env_file = ".env"
-        extra = "allow"
-
-
-class MinIOSettings(BaseSettings):
-    MINIO_ACCESS_KEY: str = Field(default="minioadmin")
-    MINIO_SECRET_KEY: str = Field(default="minioadmin")
-    MINIO_ENDPOINT: str = Field(default="http://localhost:9000")
-    MINIO_BUCKET_NAME: str = Field(default="mcp-storage")
-
-    class Config:
-        env_file = ".env"
-        extra = "allow"
-
-
-class ETCDSettings(BaseSettings):
-    ETCD_HOST: str = Field(default="localhost")
-    ETCD_PORT: int = Field(default=2379)
-    ETCD_PREFIX: str = Field(default="/mcp/")
-
-    class Config:
-        env_file = ".env"
-        extra = "allow"
-
-
-class MCPSettings(BaseSettings):
-    MCP_SERVER_URL: str = Field(default="http://localhost:8000")
-    MCP_API_KEY: Optional[str] = Field(default=None)
-    MCP_TIMEOUT: int = Field(default=30)
-    EMBEDDING_MODEL: str = Field(default="all-MiniLM-L6-v2")
-    CONTEXT_RETENTION_DAYS: int = Field(default=90)
-    FASTMCP_EMBEDDING_MODEL: str = Field(default="all-MiniLM-L6-v2")
-    FASTMCP_STORE_TYPE: str = Field(default="milvus")
-
-    class Config:
-        env_file = ".env"
-        extra = "allow"
-
-
-class MonitoringSettings(BaseSettings):
-    PROMETHEUS_PORT: int = Field(default=9090)
-    GRAFANA_PORT: int = Field(default=3000)
-    METRICS_ENABLED: bool = Field(default=True)
-    LOG_LEVEL: str = Field(default="INFO")
-
-    class Config:
-        env_file = ".env"
-        extra = "allow"
-
-
-class ServiceSettings(BaseSettings):
-    SERVICE_NAME: str = Field(default="multi-agent-code-analyzer")
-    SERVICE_PORT: int = Field(default=8080)
-    ENVIRONMENT: Environment = Field(default=Environment.DEVELOPMENT)
-    DEBUG: bool = Field(default=False)
-    CORS_ORIGINS: list[str] = Field(default=["*"])
-
-    @validator("DEBUG", pre=True)
-    def set_debug_based_on_env(cls, v: bool, values: Dict[str, Any]) -> bool:
-        if "ENVIRONMENT" in values:
-            return values["ENVIRONMENT"] == Environment.DEVELOPMENT
-        return v
-
-    class Config:
-        env_file = ".env"
-        extra = "allow"
-
-
-class IntegrationSettings(BaseSettings):
-    GITHUB_TOKEN: Optional[str] = Field(default=None)
-    GITHUB_OWNER: Optional[str] = Field(default=None)
-    GITHUB_REPO: Optional[str] = Field(default=None)
-    JIRA_DOMAIN: Optional[str] = Field(default=None)
-    JIRA_EMAIL: Optional[str] = Field(default=None)
-    JIRA_API_TOKEN: Optional[str] = Field(default=None)
-    JIRA_PROJECT_KEY: Optional[str] = Field(default=None)
-
-    class Config:
-        env_file = ".env"
-        extra = "allow"
-
-
-class SecuritySettings(BaseSettings):
-    JWT_SECRET_KEY: str = Field(default="your_jwt_secret_key")
-    JWT_ALGORITHM: str = Field(default="HS256")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30)
-
-    class Config:
-        env_file = ".env"
-        extra = "allow"
+# Load environment variables from .env file
+load_dotenv()
 
 
 class Settings(BaseSettings):
-    database: DatabaseSettings = DatabaseSettings()
-    vector_db: VectorDBSettings = VectorDBSettings()
-    minio: MinIOSettings = MinIOSettings()
-    etcd: ETCDSettings = ETCDSettings()
-    mcp: MCPSettings = MCPSettings()
-    monitoring: MonitoringSettings = MonitoringSettings()
-    service: ServiceSettings = ServiceSettings()
-    integrations: IntegrationSettings = IntegrationSettings()
-    security: SecuritySettings = SecuritySettings()
+    """Application settings."""
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-        extra = "allow"
+    # Service settings
+    SERVICE_NAME: str = "multi-agent-code-analyzer"
+    SERVICE_PORT: int = 8080
+    ENVIRONMENT: str = "development"
+    DEBUG: bool = True
+    CORS_ORIGINS: List[str] = ["http://localhost:3000"]
 
+    # Database settings
+    NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
+    NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "secure_password_123")
 
-@lru_cache()
-def get_settings() -> Settings:
-    """Get cached settings instance"""
-    return Settings()
+    # Redis settings
+    REDIS_URL: str = os.getenv(
+        "REDIS_URL", "redis://:secure_redis_123@redis:6379")
 
+    # FastMCP settings
+    FASTMCP_URL: str = os.getenv("FASTMCP_URL", "http://fastmcp:8000")
+    FASTMCP_STORE_TYPE: str = os.getenv("FASTMCP_STORE_TYPE", "milvus")
+    FASTMCP_EMBEDDING_MODEL: str = os.getenv(
+        "FASTMCP_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    CONTEXT_RETENTION_DAYS: int = int(
+        os.getenv("CONTEXT_RETENTION_DAYS", "90"))
+    VECTOR_DIM: int = int(os.getenv("VECTOR_DIM", "384"))
 
-def initialize_settings() -> None:
-    """Initialize settings and validate environment"""
-    settings = get_settings()
+    # Message Bus settings
+    MESSAGE_BUS_TYPE: str = os.getenv("MESSAGE_BUS_TYPE", "redis")
+    MESSAGE_BUS_TOPICS: List[str] = [
+        "agent.tasks", "agent.results", "system.events"]
+    MESSAGE_BUS_MAX_RETRY: int = int(os.getenv("MESSAGE_BUS_MAX_RETRY", "3"))
+    MESSAGE_BUS_RETRY_DELAY: int = int(
+        os.getenv("MESSAGE_BUS_RETRY_DELAY", "1"))
 
-    # Validate environment variables
-    required_vars = [
-        "NEO4J_PASSWORD",
-        "MCP_API_KEY",
-        "REDIS_PASSWORD"
+    # Vector Database settings
+    MILVUS_HOST: str = os.getenv("MILVUS_HOST", "milvus")
+    MILVUS_PORT: int = int(os.getenv("MILVUS_PORT", "19530"))
+    COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "mcp_contexts")
+
+    # MinIO settings
+    MINIO_ENDPOINT: str = os.getenv("MINIO_ENDPOINT", "minio:9000")
+    MINIO_ACCESS_KEY: str = os.getenv("MINIO_ACCESS_KEY", "admin")
+    MINIO_SECRET_KEY: str = os.getenv("MINIO_SECRET_KEY", "secure_minio_123")
+    MINIO_BUCKET_NAME: str = os.getenv("MINIO_BUCKET_NAME", "mcp-storage")
+
+    # Agent settings
+    MAX_AGENTS: int = int(os.getenv("MAX_AGENTS", "10"))
+    AGENT_TIMEOUT: int = int(os.getenv("AGENT_TIMEOUT", "300"))
+    AGENT_TYPES: List[str] = [
+        "code_analyzer",
+        "pattern_detector",
+        "security_scanner",
+        "dependency_analyzer"
     ]
 
-    if settings.service.ENVIRONMENT == Environment.PRODUCTION:
-        missing = [var for var in required_vars if not os.getenv(var)]
-        if missing:
-            raise ValueError(
-                f"Missing required environment variables in production: {', '.join(missing)}")
+    # Monitoring settings
+    PROMETHEUS_PORT: int = int(os.getenv("PROMETHEUS_PORT", "9090"))
+    GRAFANA_PORT: int = int(os.getenv("GRAFANA_PORT", "3000"))
+    METRICS_ENABLED: bool = os.getenv(
+        "METRICS_ENABLED", "true").lower() == "true"
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
-        # Additional production requirements
-        if not settings.security.JWT_SECRET_KEY or settings.security.JWT_SECRET_KEY == "your_jwt_secret_key":
-            raise ValueError("Production requires a secure JWT_SECRET_KEY")
+    # Security settings
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "secure_jwt_key_123")
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
+        os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 
-    # Set up logging based on environment
-    import logging
-    logging.basicConfig(
-        level=getattr(logging, settings.monitoring.LOG_LEVEL),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-
-    # Additional environment-specific initialization
-    if settings.service.ENVIRONMENT == Environment.DEVELOPMENT:
-        logging.info("Running in development mode")
-    elif settings.service.ENVIRONMENT == Environment.TESTING:
-        logging.info("Running in testing mode")
-    elif settings.service.ENVIRONMENT == Environment.PRODUCTION:
-        logging.info("Running in production mode")
-
-        # Additional production checks
-        if settings.service.DEBUG:
-            raise ValueError("Debug mode should not be enabled in production")
-
-        if "*" in settings.service.CORS_ORIGINS:
-            raise ValueError("Wildcard CORS origin not allowed in production")
+    class Config:
+        """Pydantic config."""
+        env_file = ".env"
+        case_sensitive = True
 
 
-def get_environment_settings() -> Dict[str, Any]:
-    """Get environment-specific settings"""
-    settings = get_settings()
-
-    return {
-        "environment": settings.service.ENVIRONMENT,
-        "debug": settings.service.DEBUG,
-        "database_uri": settings.database.NEO4J_URI,
-        "mcp_server": settings.mcp.MCP_SERVER_URL,
-        "metrics_enabled": settings.monitoring.METRICS_ENABLED,
-        "service_port": settings.service.SERVICE_PORT,
-        "vector_db": {
-            "host": settings.vector_db.MILVUS_HOST,
-            "port": settings.vector_db.MILVUS_PORT
-        },
-        "storage": {
-            "minio_endpoint": settings.minio.MINIO_ENDPOINT,
-            "etcd_host": settings.etcd.ETCD_HOST
-        }
-    }
+# Create settings instance
+settings = Settings()

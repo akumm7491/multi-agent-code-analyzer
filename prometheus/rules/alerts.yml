@@ -1,6 +1,24 @@
 groups:
-  - name: service_alerts
+  - name: multi-agent-code-analyzer
     rules:
+      - alert: HighRequestLatency
+        expr: http_request_duration_seconds{quantile="0.9"} > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High request latency on {{ $labels.instance }}"
+          description: "90th percentile of request latency is above 1s (current value: {{ $value }}s)"
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate on {{ $labels.instance }}"
+          description: "Error rate is above 10% (current value: {{ $value }})"
+
       - alert: ServiceDown
         expr: up == 0
         for: 1m
@@ -8,22 +26,4 @@ groups:
           severity: critical
         annotations:
           summary: "Service {{ $labels.job }} is down"
-          description: "Service {{ $labels.job }} has been down for more than 1 minute"
-
-      - alert: HighErrorRate
-        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
-        for: 2m
-        labels:
-          severity: warning
-        annotations:
-          summary: "High error rate detected for {{ $labels.job }}"
-          description: "Service {{ $labels.job }} has a high error rate"
-
-      - alert: SlowResponses
-        expr: rate(http_request_duration_seconds_sum[5m]) / rate(http_request_duration_seconds_count[5m]) > 1
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Slow response times for {{ $labels.job }}"
-          description: "Service {{ $labels.job }} is responding slowly" 
+          description: "Service has been down for more than 1 minute" 

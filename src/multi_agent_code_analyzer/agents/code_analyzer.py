@@ -1,1109 +1,597 @@
 from typing import Dict, Any, List, Optional
-import os
+import ast
 import logging
-import json
-from prometheus_client import Counter, Gauge, Histogram
+import re
+from pathlib import Path
+import asyncio
+from uuid import uuid4
+
 from .base import BaseAgent
+from ..mcp.models import Context, ContextType
+from ..tools.github import GithubService
+from .pattern_learning import PatternLearner
 
-# Define Prometheus metrics
-TASK_COUNTER = Counter('agent_tasks_total',
-                       'Total number of analysis tasks', ['agent_id'])
-TASK_DURATION = Histogram('agent_task_duration_seconds',
-                          'Task duration in seconds', ['agent_id'])
-TASK_SUCCESS = Counter('agent_task_success_total',
-                       'Total number of successful tasks', ['agent_id'])
-TASK_FAILURE = Counter('agent_task_failure_total',
-                       'Total number of failed tasks', ['agent_id'])
-MEMORY_USAGE = Gauge('agent_memory_usage_bytes',
-                     'Memory usage in bytes', ['agent_id'])
-PATTERN_CONFIDENCE = Gauge('agent_pattern_confidence', 'Confidence in pattern detection', [
-                           'agent_id', 'pattern_type'])
-
-# Code quality metrics
-CODE_COVERAGE = Gauge('code_coverage_percent',
-                      'Code coverage percentage', ['package'])
-CODE_TEST_COUNT = Gauge('code_test_count', 'Number of tests', ['package'])
-CODE_COMPLEXITY = Gauge('code_complexity_score',
-                        'Code complexity score', ['package'])
-CODE_ISSUES = Counter('code_issues_total', 'Number of code issues', [
-                      'severity', 'package'])
-CODE_DEPENDENCIES = Gauge('code_dependencies_total',
-                          'Number of dependencies', ['type', 'package'])
-CODE_PATTERNS = Counter('code_patterns_detected_total',
-                        'Number of design patterns detected', ['pattern_type', 'package'])
+logger = logging.getLogger(__name__)
 
 
 class CodeAnalyzerAgent(BaseAgent):
-    """Agent for analyzing code repositories"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.github_service = GithubService()
+        self.pattern_learner = PatternLearner(self.memory_manager.redis)
+        self.analysis_patterns = {
+            "security": self._analyze_security,
+            "performance": self._analyze_performance,
+            "maintainability": self._analyze_maintainability,
+            "architecture": self._analyze_architecture
+        }
+        self.code_metrics = {
+            "lines_of_code": 0,
+            "comment_lines": 0,
+            "complexity_sum": 0,
+            "function_count": 0,
+            "class_count": 0,
+            "test_coverage": 0.0
+        }
 
-    def __init__(self, agent_id: Optional[str] = None):
-        super().__init__(agent_id)
-        self.logger = logging.getLogger(__name__)
-        TASK_COUNTER.labels(agent_id=self.agent_id)
-        MEMORY_USAGE.labels(agent_id=self.agent_id)
-        PATTERN_CONFIDENCE.labels(agent_id=self.agent_id, pattern_type="ddd")
-        PATTERN_CONFIDENCE.labels(
-            agent_id=self.agent_id, pattern_type="microservices")
-        PATTERN_CONFIDENCE.labels(
-            agent_id=self.agent_id, pattern_type="clean_architecture")
+    async def _execute_task(
+        self,
+        task: Dict[str, Any],
+        context: Context,
+        memories: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Execute code analysis task"""
+        analysis_type = task.get("analysis_type", "full")
+        repo_path = task.get("repo_path")
 
-    async def _analyze(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze a repository"""
+        if not repo_path:
+            raise ValueError("Repository path is required")
+
+        results = {
+            "type": "code_analysis",
+            "status": "completed",
+            "findings": [],
+            "metrics": {},
+            "recommendations": []
+        }
+
+        # Reset metrics for new analysis
+        self._reset_metrics()
+
+        # Analyze code files
+        for file_path in Path(repo_path).rglob("*.py"):
+            try:
+                with open(file_path, 'r') as f:
+                    code = f.read()
+
+                # Create context for the file
+                file_context = await self._create_file_context(file_path, code)
+
+                # Update basic metrics
+                self._update_basic_metrics(code)
+
+                # Perform requested analysis
+                if analysis_type == "full" or analysis_type == "security":
+                    security_issues = await self._analyze_security(code, file_context)
+                    results["findings"].extend(security_issues)
+
+                if analysis_type == "full" or analysis_type == "performance":
+                    perf_issues = await self._analyze_performance(code, file_context)
+                    results["findings"].extend(perf_issues)
+
+                if analysis_type == "full" or analysis_type == "maintainability":
+                    maint_issues = await self._analyze_maintainability(code, file_context)
+                    results["findings"].extend(maint_issues)
+
+                if analysis_type == "full" or analysis_type == "architecture":
+                    arch_issues = await self._analyze_architecture(code, file_context)
+                    results["findings"].extend(arch_issues)
+
+                # Learn from the analysis
+                for finding in results["findings"]:
+                    await self._learn_from_finding(finding, file_context)
+
+            except Exception as e:
+                logger.error(
+                    f"Error analyzing {file_path}: {e}", exc_info=True)
+                results["findings"].append({
+                    "type": "error",
+                    "file": str(file_path),
+                    "message": f"Analysis failed: {str(e)}"
+                })
+
+        # Add metrics to results
+        results["metrics"].update(self.code_metrics)
+
+        # Generate recommendations
+        results["recommendations"] = await self._generate_recommendations(
+            results["findings"],
+            memories
+        )
+
+        return results
+
+    async def _create_file_context(self, file_path: Path, code: str) -> Context:
+        """Create context for a code file"""
+        return Context(
+            id=uuid4(),
+            type=ContextType.CODE_SNIPPET,
+            content=code,
+            metadata={
+                "file_path": str(file_path),
+                "language": "python",
+                "agent_id": self.agent_id,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+
+    async def _analyze_security(self, code: str, context: Context) -> List[Dict[str, Any]]:
+        """Analyze code for security issues"""
+        issues = []
         try:
-            TASK_COUNTER.labels(agent_id=self.agent_id).inc()
-            with TASK_DURATION.labels(agent_id=self.agent_id).time():
-                repo_path = context.get("repo_path")
-                analysis_type = context.get("analysis_type", "full")
-
-                if not repo_path or not os.path.exists(repo_path):
-                    raise ValueError(f"Invalid repository path: {repo_path}")
-
-                # Perform analysis based on type
-                if analysis_type == "full":
-                    result = await self._full_analysis(repo_path)
-                elif analysis_type == "quick":
-                    result = await self._quick_analysis(repo_path)
-                else:
-                    raise ValueError(f"Unknown analysis type: {analysis_type}")
-
-                TASK_SUCCESS.labels(agent_id=self.agent_id).inc()
-                return result
-
-        except Exception as e:
-            TASK_FAILURE.labels(agent_id=self.agent_id).inc()
-            self.logger.error(f"Analysis failed: {str(e)}")
-            raise
-
-    async def _implement(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Not supported for code analyzer agent"""
-        raise NotImplementedError(
-            "CodeAnalyzerAgent does not support implementation tasks")
-
-    async def _custom_task(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a custom task"""
-        try:
-            description = context.get("description")
-            task_context = context.get("context", {})
-
-            # For now, just return a simple analysis
-            return {
-                "task": description,
-                "context": task_context,
-                "result": "Custom task executed successfully"
-            }
-
-        except Exception as e:
-            self.logger.error(f"Custom task failed: {str(e)}")
-            raise
-
-    async def _full_analysis(self, repo_path: str) -> Dict[str, Any]:
-        """Perform a full repository analysis"""
-        try:
-            # Analyze architecture
-            architecture = await self._analyze_architecture(repo_path)
-
-            # Analyze patterns
-            patterns = await self._analyze_patterns(repo_path)
-
-            # Analyze dependencies
-            dependencies = await self._analyze_dependencies(repo_path)
-
-            # Analyze API endpoints
-            api_endpoints = await self._analyze_api_endpoints(repo_path)
-
-            # Analyze data models
-            data_models = await self._analyze_data_models(repo_path)
-
-            # Analyze business logic
-            business_logic = await self._analyze_business_logic(repo_path)
-
-            return {
-                "analysis": {
-                    "architecture": architecture,
-                    "patterns": patterns,
-                    "dependencies": dependencies,
-                    "api_endpoints": api_endpoints,
-                    "data_models": data_models,
-                    "business_logic": business_logic
-                }
-            }
-
-        except Exception as e:
-            self.logger.error(f"Full analysis failed: {str(e)}")
-            raise
-
-    async def _quick_analysis(self, repo_path: str) -> Dict[str, Any]:
-        """Perform a quick repository analysis"""
-        try:
-            # Basic structure analysis
-            structure = await self._analyze_structure(repo_path)
-
-            # Basic code quality analysis
-            code_quality = await self._analyze_code_quality(repo_path)
-
-            return {
-                "analysis": {
-                    "structure": structure,
-                    "code_quality": code_quality
-                }
-            }
-
-        except Exception as e:
-            self.logger.error(f"Quick analysis failed: {str(e)}")
-            raise
-
-    async def _analyze_architecture(self, repo_path: str) -> Dict[str, Any]:
-        """Analyze repository architecture"""
-        try:
-            architecture = {
-                "layers": [],
-                "components": [],
-                "patterns_detected": [],
-                "dependencies": [],
-                "summary": {}
-            }
-
-            # Common architectural patterns to detect
-            patterns = {
-                "ddd": ["domain", "application", "infrastructure", "interfaces", "entities", "repositories", "services", "valueobjects"],
-                "clean_architecture": ["entities", "usecases", "interfaces", "frameworks"],
-                "mvc": ["models", "views", "controllers"],
-                "hexagonal": ["adapters", "ports", "domain"],
-                "microservices": ["services", "api", "gateway", "registry"]
-            }
-
-            # Scan directory structure
-            for root, dirs, files in os.walk(repo_path):
-                rel_path = os.path.relpath(root, repo_path)
-                if rel_path == ".":
-                    continue
-
-                path_parts = rel_path.lower().split(os.sep)
-
-                # Detect layers
-                for part in path_parts:
-                    if part in ["domain", "application", "infrastructure", "presentation", "persistence", "api"]:
-                        if part not in [layer["name"] for layer in architecture["layers"]]:
-                            architecture["layers"].append({
-                                "name": part,
-                                "path": rel_path
-                            })
-
-                # Detect components
-                if any(f.endswith(('.py', '.js', '.ts', '.java', '.cs', '.go')) for f in files):
-                    component = {
-                        "name": os.path.basename(rel_path),
-                        "path": rel_path,
-                        "type": "unknown",
-                        "files": len(files)
-                    }
-
-                    # Determine component type
-                    if "test" in rel_path.lower():
-                        component["type"] = "test"
-                    elif "controller" in rel_path.lower():
-                        component["type"] = "controller"
-                    elif "service" in rel_path.lower():
-                        component["type"] = "service"
-                    elif "repository" in rel_path.lower():
-                        component["type"] = "repository"
-                    elif "model" in rel_path.lower() or "entity" in rel_path.lower():
-                        component["type"] = "model"
-
-                    architecture["components"].append(component)
-
-            # Detect architectural patterns
-            for pattern_name, pattern_dirs in patterns.items():
-                matches = sum(1 for dir_name in pattern_dirs if any(
-                    dir_name in component["path"].lower() for component in architecture["components"]
-                ))
-                # If at least half of the pattern directories are found
-                if matches >= len(pattern_dirs) // 2:
-                    architecture["patterns_detected"].append(pattern_name)
-
-            # Generate summary
-            architecture["summary"] = {
-                "total_layers": len(architecture["layers"]),
-                "total_components": len(architecture["components"]),
-                "components_by_type": {},
-                "detected_patterns": architecture["patterns_detected"],
-                "architectural_style": "unknown"
-            }
-
-            # Count components by type
-            for component in architecture["components"]:
-                comp_type = component["type"]
-                architecture["summary"]["components_by_type"][comp_type] = \
-                    architecture["summary"]["components_by_type"].get(
-                        comp_type, 0) + 1
-
-            # Determine overall architectural style
-            if "ddd" in architecture["patterns_detected"]:
-                architecture["summary"]["architectural_style"] = "Domain-Driven Design"
-            elif "clean_architecture" in architecture["patterns_detected"]:
-                architecture["summary"]["architectural_style"] = "Clean Architecture"
-            elif "mvc" in architecture["patterns_detected"]:
-                architecture["summary"]["architectural_style"] = "Model-View-Controller"
-            elif "hexagonal" in architecture["patterns_detected"]:
-                architecture["summary"]["architectural_style"] = "Hexagonal Architecture"
-            elif "microservices" in architecture["patterns_detected"]:
-                architecture["summary"]["architectural_style"] = "Microservices"
-
-            return architecture
-
-        except Exception as e:
-            self.logger.error(f"Architecture analysis failed: {str(e)}")
-            return {"error": str(e)}
-
-    async def _analyze_patterns(self, repo_path: str) -> Dict[str, Any]:
-        """Analyze design patterns used in the repository"""
-        try:
-            patterns = {
-                "detected": [],
-                "potential": [],
-                "by_category": {
-                    "creational": [],
-                    "structural": [],
-                    "behavioral": [],
-                    "architectural": [],
-                    "enterprise": []
-                }
-            }
-
-            # Common pattern indicators
-            pattern_indicators = {
-                "creational": {
-                    "factory": ["factory", "create", "builder"],
-                    "singleton": ["singleton", "instance"],
-                    "prototype": ["clone", "prototype"],
-                    "builder": ["builder", "director"],
-                    "abstract_factory": ["abstract", "factory"]
-                },
-                "structural": {
-                    "adapter": ["adapter", "wrapper"],
-                    "bridge": ["bridge", "implementation"],
-                    "composite": ["composite", "component"],
-                    "decorator": ["decorator", "wrapper"],
-                    "facade": ["facade"],
-                    "proxy": ["proxy"]
-                },
-                "behavioral": {
-                    "observer": ["observer", "subscriber", "event"],
-                    "strategy": ["strategy", "algorithm"],
-                    "command": ["command", "invoker"],
-                    "state": ["state", "context"],
-                    "mediator": ["mediator", "coordinator"],
-                    "chain_of_responsibility": ["chain", "handler"]
-                },
-                "architectural": {
-                    "repository": ["repository", "repo"],
-                    "unit_of_work": ["unitofwork", "unit-of-work"],
-                    "service": ["service"],
-                    "controller": ["controller"],
-                    "middleware": ["middleware"]
-                },
-                "enterprise": {
-                    "specification": ["specification", "spec"],
-                    "aggregate": ["aggregate", "root"],
-                    "entity": ["entity"],
-                    "value_object": ["valueobject", "value-object"],
-                    "domain_event": ["domain-event", "domainevent"]
-                }
-            }
-
-            package_name = os.path.basename(repo_path)
-
-            # Scan all TypeScript/JavaScript files
-            for root, _, files in os.walk(repo_path):
-                for file in files:
-                    if file.endswith(('.ts', '.js')):
-                        file_path = os.path.join(root, file)
-                        try:
-                            with open(file_path, 'r', encoding='utf-8') as f:
-                                content = f.read().lower()
-
-                                # Check for pattern indicators
-                                for category, category_patterns in pattern_indicators.items():
-                                    for pattern, indicators in category_patterns.items():
-                                        if any(indicator in content for indicator in indicators):
-                                            if pattern not in patterns["by_category"][category]:
-                                                patterns["by_category"][category].append(
-                                                    pattern)
-                                                patterns["detected"].append({
-                                                    "name": pattern,
-                                                    "category": category,
-                                                    "file": os.path.relpath(file_path, repo_path)
-                                                })
-                                                # Update Prometheus metrics
-                                                CODE_PATTERNS.labels(
-                                                    pattern_type=pattern,
-                                                    package=package_name
-                                                ).inc()
-
-                                # Check for potential patterns based on file structure
-                                if "test" in file_path:
-                                    patterns["potential"].append({
-                                        "name": "test_fixture",
-                                        "category": "testing",
-                                        "file": os.path.relpath(file_path, repo_path)
-                                    })
-                                elif "mock" in file_path or "stub" in file_path:
-                                    patterns["potential"].append({
-                                        "name": "test_double",
-                                        "category": "testing",
-                                        "file": os.path.relpath(file_path, repo_path)
-                                    })
-
-                        except Exception as e:
-                            self.logger.warning(
-                                f"Error analyzing file {file_path}: {str(e)}")
-
-            # Add summary
-            patterns["summary"] = {
-                "total_patterns": len(patterns["detected"]),
-                "patterns_by_category": {
-                    category: len(patterns["by_category"][category])
-                    for category in patterns["by_category"]
-                },
-                "potential_patterns": len(patterns["potential"])
-            }
-
-            # Update pattern confidence metrics
-            total_patterns = len(patterns["detected"])
-            if total_patterns > 0:
-                ddd_patterns = len(
-                    [p for p in patterns["detected"] if p["category"] == "enterprise"])
-                ms_patterns = len(
-                    [p for p in patterns["detected"] if p["category"] == "architectural"])
-                clean_patterns = len([p for p in patterns["detected"] if p["category"] in [
-                                     "creational", "structural"]])
-
-                PATTERN_CONFIDENCE.labels(
-                    agent_id=self.agent_id,
-                    pattern_type="ddd"
-                ).set(ddd_patterns / total_patterns)
-                PATTERN_CONFIDENCE.labels(
-                    agent_id=self.agent_id,
-                    pattern_type="microservices"
-                ).set(ms_patterns / total_patterns)
-                PATTERN_CONFIDENCE.labels(
-                    agent_id=self.agent_id,
-                    pattern_type="clean_architecture"
-                ).set(clean_patterns / total_patterns)
-
-            return patterns
-
-        except Exception as e:
-            self.logger.error(f"Pattern analysis failed: {str(e)}")
-            return {"error": str(e)}
-
-    async def _analyze_dependencies(self, repo_path: str) -> Dict[str, Any]:
-        """Analyze repository dependencies"""
-        try:
-            dependencies = {
-                "packages": {},
-                "internal_dependencies": [],
-                "external_dependencies": {},
-                "dev_dependencies": {},
-                "peer_dependencies": {},
-                "summary": {}
-            }
-
-            # Find all package.json files
-            for root, _, files in os.walk(repo_path):
-                if "package.json" in files:
-                    package_path = os.path.join(root, "package.json")
-                    try:
-                        with open(package_path, 'r', encoding='utf-8') as f:
-                            package_data = json.loads(f.read())
-                            package_name = package_data.get(
-                                "name", os.path.basename(root))
-
-                            # Store package info
-                            dependencies["packages"][package_name] = {
-                                "version": package_data.get("version", "unknown"),
-                                "description": package_data.get("description", ""),
-                                "main": package_data.get("main", ""),
-                                "dependencies": package_data.get("dependencies", {}),
-                                "devDependencies": package_data.get("devDependencies", {}),
-                                "peerDependencies": package_data.get("peerDependencies", {}),
-                                "path": os.path.relpath(root, repo_path)
-                            }
-
-                            # Track dependencies
-                            for dep_name, dep_version in package_data.get("dependencies", {}).items():
-                                if dep_name.startswith("@" + package_name):
-                                    # Internal dependency
-                                    dependencies["internal_dependencies"].append({
-                                        "from": package_name,
-                                        "to": dep_name,
-                                        "version": dep_version
-                                    })
-                                else:
-                                    # External dependency
-                                    if dep_name not in dependencies["external_dependencies"]:
-                                        dependencies["external_dependencies"][dep_name] = {
-                                            "version": dep_version,
-                                            "used_by": []
-                                        }
-                                    dependencies["external_dependencies"][dep_name]["used_by"].append(
-                                        package_name)
-
-                            # Track dev dependencies
-                            for dep_name, dep_version in package_data.get("devDependencies", {}).items():
-                                if dep_name not in dependencies["dev_dependencies"]:
-                                    dependencies["dev_dependencies"][dep_name] = {
-                                        "version": dep_version,
-                                        "used_by": []
-                                    }
-                                dependencies["dev_dependencies"][dep_name]["used_by"].append(
-                                    package_name)
-
-                            # Track peer dependencies
-                            for dep_name, dep_version in package_data.get("peerDependencies", {}).items():
-                                if dep_name not in dependencies["peer_dependencies"]:
-                                    dependencies["peer_dependencies"][dep_name] = {
-                                        "version": dep_version,
-                                        "used_by": []
-                                    }
-                                dependencies["peer_dependencies"][dep_name]["used_by"].append(
-                                    package_name)
-
-                    except Exception as e:
-                        self.logger.warning(
-                            f"Error analyzing package.json at {package_path}: {str(e)}")
-
-            # Generate summary
-            dependencies["summary"] = {
-                "total_packages": len(dependencies["packages"]),
-                "internal_dependencies": len(dependencies["internal_dependencies"]),
-                "external_dependencies": len(dependencies["external_dependencies"]),
-                "dev_dependencies": len(dependencies["dev_dependencies"]),
-                "peer_dependencies": len(dependencies["peer_dependencies"]),
-                "most_used_dependencies": sorted(
-                    [
-                        {"name": name, "usage_count": len(info["used_by"])}
-                        for name, info in dependencies["external_dependencies"].items()
-                    ],
-                    key=lambda x: x["usage_count"],
-                    reverse=True
-                )[:5]
-            }
-
-            return dependencies
-
-        except Exception as e:
-            self.logger.error(f"Dependencies analysis failed: {str(e)}")
-            return {"error": str(e)}
-
-    async def _analyze_api_endpoints(self, repo_path: str) -> Dict[str, Any]:
-        """Analyze API endpoints in the repository"""
-        try:
-            api_info = {
-                "endpoints": [],
-                "controllers": [],
-                "middleware": [],
-                "routes": [],
-                "summary": {}
-            }
-
-            # Common API decorators and patterns
-            api_patterns = {
-                "decorators": [
-                    "@get", "@post", "@put", "@delete", "@patch",
-                    "@controller", "@route", "@middleware",
-                    "@api", "@rest", "@graphql"
-                ],
-                "methods": [
-                    "get", "post", "put", "delete", "patch",
-                    "options", "head", "trace", "connect"
-                ],
-                "frameworks": [
-                    "express", "koa", "fastify", "nest",
-                    "apollo", "graphql", "rest", "openapi"
-                ]
-            }
-
-            # Scan TypeScript/JavaScript files
-            for root, _, files in os.walk(repo_path):
-                for file in files:
-                    if file.endswith(('.ts', '.js', '.tsx', '.jsx')):
-                        file_path = os.path.join(root, file)
-                        try:
-                            with open(file_path, 'r', encoding='utf-8') as f:
-                                content = f.read()
-                                lines = content.split('\n')
-
-                                # Track current context
-                                current_controller = None
-                                current_route = None
-
-                                for i, line in enumerate(lines):
-                                    line_lower = line.lower()
-
-                                    # Detect controllers
-                                    if "@controller" in line_lower or "controller" in file.lower():
-                                        controller_info = {
-                                            "name": file.replace(".ts", "").replace(".js", ""),
-                                            "path": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1,
-                                            "endpoints": []
-                                        }
-                                        current_controller = controller_info
-                                        api_info["controllers"].append(
-                                            controller_info)
-
-                                    # Detect middleware
-                                    if "@middleware" in line_lower or "middleware" in file.lower():
-                                        api_info["middleware"].append({
-                                            "name": file.replace(".ts", "").replace(".js", ""),
-                                            "path": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1
-                                        })
-
-                                    # Detect routes and endpoints
-                                    for method in api_patterns["methods"]:
-                                        method_pattern = f"@{method}"
-                                        if method_pattern in line_lower or f".{method}(" in line_lower:
-                                            # Extract route path if present
-                                            route_match = None
-                                            if "(" in line:
-                                                route_match = line[line.find(
-                                                    "(")+1:line.find(")")].strip("'\"")
-
-                                            endpoint_info = {
-                                                "method": method.upper(),
-                                                "path": route_match or "unknown",
-                                                "controller": current_controller["name"] if current_controller else None,
-                                                "file": os.path.relpath(file_path, repo_path),
-                                                "line": i + 1
-                                            }
-
-                                            api_info["endpoints"].append(
-                                                endpoint_info)
-                                            if current_controller:
-                                                current_controller["endpoints"].append(
-                                                    endpoint_info)
-
-                                    # Detect route definitions
-                                    if ".route" in line_lower or "@route" in line_lower:
-                                        route_info = {
-                                            "path": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1,
-                                            "definition": line.strip()
-                                        }
-                                        api_info["routes"].append(route_info)
-
-                        except Exception as e:
-                            self.logger.warning(
-                                f"Error analyzing file {file_path}: {str(e)}")
-
-            # Generate summary
-            api_info["summary"] = {
-                "total_endpoints": len(api_info["endpoints"]),
-                "total_controllers": len(api_info["controllers"]),
-                "total_middleware": len(api_info["middleware"]),
-                "endpoints_by_method": {},
-                "endpoints_by_controller": {}
-            }
-
-            # Count endpoints by method
-            for endpoint in api_info["endpoints"]:
-                method = endpoint["method"]
-                api_info["summary"]["endpoints_by_method"][method] = \
-                    api_info["summary"]["endpoints_by_method"].get(
-                        method, 0) + 1
-
-            # Count endpoints by controller
-            for controller in api_info["controllers"]:
-                controller_name = controller["name"]
-                api_info["summary"]["endpoints_by_controller"][controller_name] = \
-                    len(controller["endpoints"])
-
-            return api_info
-
-        except Exception as e:
-            self.logger.error(f"API endpoints analysis failed: {str(e)}")
-            return {"error": str(e)}
-
-    async def _analyze_data_models(self, repo_path: str) -> Dict[str, Any]:
-        """Analyze data models in the repository"""
-        try:
-            models = {
-                "entities": [],
-                "value_objects": [],
-                "aggregates": [],
-                "data_transfer_objects": [],
-                "interfaces": [],
-                "enums": [],
-                "summary": {}
-            }
-
-            # Common model patterns
-            model_patterns = {
-                "entity": ["class", "extends", "entity", "model"],
-                "value_object": ["valueobject", "value-object", "readonly", "immutable"],
-                "aggregate": ["aggregate", "root", "aggregate-root"],
-                "dto": ["dto", "interface", "type", "data transfer"],
-                "enum": ["enum", "enumeration"]
-            }
-
-            # Scan TypeScript files
-            for root, _, files in os.walk(repo_path):
-                for file in files:
-                    if file.endswith('.ts'):
-                        file_path = os.path.join(root, file)
-                        try:
-                            with open(file_path, 'r', encoding='utf-8') as f:
-                                content = f.read()
-                                lines = content.split('\n')
-
-                                # Track current context
-                                current_class = None
-                                in_interface = False
-                                in_enum = False
-                                properties = []
-
-                                for i, line in enumerate(lines):
-                                    line_lower = line.lower().strip()
-
-                                    # Detect class definitions
-                                    if "class" in line_lower and "{" in line:
-                                        class_info = {
-                                            "name": line.split("class")[1].split("{")[0].strip().split(" ")[0],
-                                            "type": "unknown",
-                                            "file": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1,
-                                            "properties": [],
-                                            "methods": []
-                                        }
-
-                                        # Determine class type
-                                        if any(p in line_lower for p in model_patterns["entity"]):
-                                            class_info["type"] = "entity"
-                                            models["entities"].append(
-                                                class_info)
-                                        elif any(p in line_lower for p in model_patterns["value_object"]):
-                                            class_info["type"] = "value_object"
-                                            models["value_objects"].append(
-                                                class_info)
-                                        elif any(p in line_lower for p in model_patterns["aggregate"]):
-                                            class_info["type"] = "aggregate"
-                                            models["aggregates"].append(
-                                                class_info)
-
-                                        current_class = class_info
-
-                                    # Detect interface definitions
-                                    elif "interface" in line_lower and "{" in line:
-                                        interface_info = {
-                                            "name": line.split("interface")[1].split("{")[0].strip(),
-                                            "file": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1,
-                                            "properties": []
-                                        }
-                                        models["interfaces"].append(
-                                            interface_info)
-                                        in_interface = True
-                                        current_class = interface_info
-
-                                    # Detect enum definitions
-                                    elif "enum" in line_lower and "{" in line:
-                                        enum_info = {
-                                            "name": line.split("enum")[1].split("{")[0].strip(),
-                                            "file": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1,
-                                            "values": []
-                                        }
-                                        models["enums"].append(enum_info)
-                                        in_enum = True
-                                        current_class = enum_info
-
-                                    # Track properties and methods
-                                    elif current_class and not line_lower.startswith("//"):
-                                        if ":" in line and "(" not in line:  # Property
-                                            prop = line.split(":")[0].strip()
-                                            if prop and not prop.startswith(("constructor", "private", "protected")):
-                                                if in_enum:
-                                                    current_class["values"].append(
-                                                        prop)
-                                                else:
-                                                    current_class["properties"].append(
-                                                        prop)
-                                        # Method
-                                        elif "(" in line and ")" in line and "{" in line:
-                                            if hasattr(current_class, "methods"):
-                                                method = line.split(
-                                                    "(")[0].strip()
-                                                if method and not method.startswith(("constructor", "private", "protected")):
-                                                    current_class["methods"].append(
-                                                        method)
-
-                                    # End of definition
-                                    if "}" in line:
-                                        if current_class:
-                                            current_class = None
-                                        in_interface = False
-                                        in_enum = False
-
-                        except Exception as e:
-                            self.logger.warning(
-                                f"Error analyzing file {file_path}: {str(e)}")
-
-            # Generate summary
-            models["summary"] = {
-                "total_entities": len(models["entities"]),
-                "total_value_objects": len(models["value_objects"]),
-                "total_aggregates": len(models["aggregates"]),
-                "total_interfaces": len(models["interfaces"]),
-                "total_enums": len(models["enums"]),
-                "models_by_type": {
-                    "entities": len(models["entities"]),
-                    "value_objects": len(models["value_objects"]),
-                    "aggregates": len(models["aggregates"]),
-                    "interfaces": len(models["interfaces"]),
-                    "enums": len(models["enums"])
-                }
-            }
-
-            return models
-
-        except Exception as e:
-            self.logger.error(f"Data models analysis failed: {str(e)}")
-            return {"error": str(e)}
-
-    async def _analyze_business_logic(self, repo_path: str) -> Dict[str, Any]:
-        """Analyze business logic in the repository"""
-        try:
-            business_logic = {
-                "services": [],
-                "commands": [],
-                "queries": [],
-                "domain_rules": [],
-                "behaviors": [],
-                "validations": [],
-                "summary": {}
-            }
-
-            # Common business logic patterns
-            logic_patterns = {
-                "service": ["service", "manager", "handler", "processor"],
-                "command": ["command", "commandhandler", "usecase"],
-                "query": ["query", "queryhandler", "finder", "reader"],
-                "domain_rule": ["rule", "policy", "specification", "constraint"],
-                "behavior": ["behavior", "behaviour", "trait", "aspect"],
-                "validation": ["validate", "validator", "check", "assert"]
-            }
-
-            # Scan TypeScript files
-            for root, _, files in os.walk(repo_path):
-                for file in files:
-                    if file.endswith('.ts'):
-                        file_path = os.path.join(root, file)
-                        try:
-                            with open(file_path, 'r', encoding='utf-8') as f:
-                                content = f.read()
-                                lines = content.split('\n')
-
-                                # Track current context
-                                current_item = None
-
-                                for i, line in enumerate(lines):
-                                    line_lower = line.lower().strip()
-
-                                    # Detect service classes
-                                    if any(p in line_lower for p in logic_patterns["service"]) and "class" in line_lower:
-                                        service_info = {
-                                            "name": line.split("class")[1].split("{")[0].strip().split(" ")[0],
-                                            "file": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1,
-                                            "methods": [],
-                                            "dependencies": []
-                                        }
-                                        business_logic["services"].append(
-                                            service_info)
-                                        current_item = service_info
-
-                                    # Detect command handlers
-                                    elif any(p in line_lower for p in logic_patterns["command"]) and ("class" in line_lower or "interface" in line_lower):
-                                        command_info = {
-                                            "name": line.split(("class" if "class" in line_lower else "interface"))[1].split("{")[0].strip().split(" ")[0],
-                                            "file": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1,
-                                            "type": "command",
-                                            "parameters": []
-                                        }
-                                        business_logic["commands"].append(
-                                            command_info)
-                                        current_item = command_info
-
-                                    # Detect query handlers
-                                    elif any(p in line_lower for p in logic_patterns["query"]) and ("class" in line_lower or "interface" in line_lower):
-                                        query_info = {
-                                            "name": line.split(("class" if "class" in line_lower else "interface"))[1].split("{")[0].strip().split(" ")[0],
-                                            "file": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1,
-                                            "type": "query",
-                                            "parameters": []
-                                        }
-                                        business_logic["queries"].append(
-                                            query_info)
-                                        current_item = query_info
-
-                                    # Detect domain rules and specifications
-                                    elif any(p in line_lower for p in logic_patterns["domain_rule"]):
-                                        rule_info = {
-                                            "name": line.split(("class" if "class" in line_lower else "interface"))[1].split("{")[0].strip().split(" ")[0] if "class" in line_lower or "interface" in line_lower else "unknown",
-                                            "file": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1,
-                                            "type": "domain_rule",
-                                            "description": line.strip()
-                                        }
-                                        business_logic["domain_rules"].append(
-                                            rule_info)
-
-                                    # Detect behaviors and traits
-                                    elif any(p in line_lower for p in logic_patterns["behavior"]):
-                                        behavior_info = {
-                                            "name": line.split(("class" if "class" in line_lower else "interface"))[1].split("{")[0].strip().split(" ")[0] if "class" in line_lower or "interface" in line_lower else "unknown",
-                                            "file": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1,
-                                            "type": "behavior",
-                                            "description": line.strip()
-                                        }
-                                        business_logic["behaviors"].append(
-                                            behavior_info)
-
-                                    # Detect validations
-                                    elif any(p in line_lower for p in logic_patterns["validation"]):
-                                        validation_info = {
-                                            "file": os.path.relpath(file_path, repo_path),
-                                            "line": i + 1,
-                                            "type": "validation",
-                                            "description": line.strip()
-                                        }
-                                        business_logic["validations"].append(
-                                            validation_info)
-
-                                    # Track methods and parameters
-                                    elif current_item and "(" in line and ")" in line:
-                                        if hasattr(current_item, "methods"):
-                                            method = line.split("(")[0].strip()
-                                            if method and not method.startswith(("constructor", "private", "protected")):
-                                                current_item["methods"].append(
-                                                    method)
-
-                                        if hasattr(current_item, "parameters"):
-                                            params = line[line.find(
-                                                "(")+1:line.find(")")].strip()
-                                            if params:
-                                                current_item["parameters"].extend(
-                                                    [p.strip() for p in params.split(",")])
-
-                                    # Track dependencies (imports and injections)
-                                    elif current_item and ("import" in line_lower or "@inject" in line_lower):
-                                        if hasattr(current_item, "dependencies"):
-                                            current_item["dependencies"].append(
-                                                line.strip())
-
-                                    # End of definition
-                                    if "}" in line and current_item:
-                                        current_item = None
-
-                        except Exception as e:
-                            self.logger.warning(
-                                f"Error analyzing file {file_path}: {str(e)}")
-
-            # Generate summary
-            business_logic["summary"] = {
-                "total_services": len(business_logic["services"]),
-                "total_commands": len(business_logic["commands"]),
-                "total_queries": len(business_logic["queries"]),
-                "total_domain_rules": len(business_logic["domain_rules"]),
-                "total_behaviors": len(business_logic["behaviors"]),
-                "total_validations": len(business_logic["validations"]),
-                "components_by_type": {
-                    "services": len(business_logic["services"]),
-                    "commands": len(business_logic["commands"]),
-                    "queries": len(business_logic["queries"]),
-                    "domain_rules": len(business_logic["domain_rules"]),
-                    "behaviors": len(business_logic["behaviors"]),
-                    "validations": len(business_logic["validations"])
-                }
-            }
-
-            return business_logic
-
-        except Exception as e:
-            self.logger.error(f"Business logic analysis failed: {str(e)}")
-            return {"error": str(e)}
-
-    async def _analyze_structure(self, repo_path: str) -> Dict[str, Any]:
-        """Analyze repository structure"""
-        try:
-            structure = {
-                "directories": [],
-                "files": [],
-                "summary": {}
-            }
-
-            for root, dirs, files in os.walk(repo_path):
-                rel_path = os.path.relpath(root, repo_path)
-                if rel_path == ".":
-                    rel_path = ""
-
-                # Skip .git and other hidden directories
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
-
-                # Add directory info
-                if rel_path:
-                    structure["directories"].append({
-                        "path": rel_path,
-                        "name": os.path.basename(rel_path)
-                    })
-
-                # Add file info
-                for file in files:
-                    if not file.startswith('.'):
-                        file_path = os.path.join(rel_path, file)
-                        structure["files"].append({
-                            "path": file_path,
-                            "name": file,
-                            "extension": os.path.splitext(file)[1][1:] if os.path.splitext(file)[1] else None
+            tree = ast.parse(code)
+
+            # Check for potential security issues
+            for node in ast.walk(tree):
+                # Check for hardcoded secrets
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            if any(secret in target.id.lower() for secret in ["password", "secret", "key", "token"]):
+                                issues.append({
+                                    "type": "security",
+                                    "severity": "high",
+                                    "file": context.metadata["file_path"],
+                                    "line": node.lineno,
+                                    "message": f"Potential hardcoded secret in variable '{target.id}'"
+                                })
+
+                # Check for unsafe eval usage
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name) and node.func.id == "eval":
+                        issues.append({
+                            "type": "security",
+                            "severity": "high",
+                            "file": context.metadata["file_path"],
+                            "line": node.lineno,
+                            "message": "Unsafe use of eval()"
                         })
 
-            # Generate summary
-            extensions = {}
-            for file in structure["files"]:
-                ext = file["extension"] or "no_extension"
-                extensions[ext] = extensions.get(ext, 0) + 1
-
-            structure["summary"] = {
-                "total_directories": len(structure["directories"]),
-                "total_files": len(structure["files"]),
-                "file_types": extensions
-            }
-
-            return structure
-        except Exception as e:
-            self.logger.error(f"Structure analysis failed: {str(e)}")
-            return {"error": str(e)}
-
-    async def _analyze_code_quality(self, repo_path: str) -> Dict[str, Any]:
-        """Analyze code quality"""
-        try:
-            quality_metrics = {
-                "files_analyzed": 0,
-                "total_lines": 0,
-                "code_lines": 0,
-                "comment_lines": 0,
-                "blank_lines": 0,
-                "files_by_language": {},
-                "issues": []
-            }
-
-            package_name = os.path.basename(repo_path)
-
-            # File extensions to analyze
-            code_extensions = {
-                'py': 'Python',
-                'js': 'JavaScript',
-                'ts': 'TypeScript',
-                'java': 'Java',
-                'cs': 'C#',
-                'go': 'Go',
-                'rs': 'Rust',
-                'cpp': 'C++',
-                'c': 'C',
-                'php': 'PHP',
-                'rb': 'Ruby'
-            }
-
-            for root, _, files in os.walk(repo_path):
-                for file in files:
-                    ext = os.path.splitext(file)[1][1:].lower()
-                    if ext in code_extensions:
-                        file_path = os.path.join(root, file)
-                        try:
-                            with open(file_path, 'r', encoding='utf-8') as f:
-                                lines = f.readlines()
-
-                                quality_metrics['files_analyzed'] += 1
-                                quality_metrics['total_lines'] += len(lines)
-
-                                code_lines = 0
-                                comment_lines = 0
-                                blank_lines = 0
-
-                                in_multiline_comment = False
-
-                                for line in lines:
-                                    line = line.strip()
-
-                                    if not line:
-                                        blank_lines += 1
-                                    elif line.startswith('#') or line.startswith('//'):
-                                        comment_lines += 1
-                                    elif '"""' in line or "'''" in line:
-                                        comment_lines += 1
-                                        in_multiline_comment = not in_multiline_comment
-                                    elif in_multiline_comment:
-                                        comment_lines += 1
-                                    else:
-                                        code_lines += 1
-
-                                quality_metrics['code_lines'] += code_lines
-                                quality_metrics['comment_lines'] += comment_lines
-                                quality_metrics['blank_lines'] += blank_lines
-
-                                lang = code_extensions[ext]
-                                if lang not in quality_metrics['files_by_language']:
-                                    quality_metrics['files_by_language'][lang] = {
-                                        'files': 0,
-                                        'total_lines': 0,
-                                        'code_lines': 0,
-                                        'comment_lines': 0,
-                                        'blank_lines': 0
-                                    }
-
-                                quality_metrics['files_by_language'][lang]['files'] += 1
-                                quality_metrics['files_by_language'][lang]['total_lines'] += len(
-                                    lines)
-                                quality_metrics['files_by_language'][lang]['code_lines'] += code_lines
-                                quality_metrics['files_by_language'][lang]['comment_lines'] += comment_lines
-                                quality_metrics['files_by_language'][lang]['blank_lines'] += blank_lines
-
-                        except Exception as e:
-                            quality_metrics['issues'].append({
-                                'file': file_path,
-                                'error': str(e)
+                # Check for SQL injection vulnerabilities
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Attribute):
+                        if node.func.attr in ['execute', 'executemany']:
+                            issues.append({
+                                "type": "security",
+                                "severity": "high",
+                                "file": context.metadata["file_path"],
+                                "line": node.lineno,
+                                "message": "Potential SQL injection vulnerability"
                             })
-                            CODE_ISSUES.labels(
-                                severity="error",
-                                package=package_name
-                            ).inc()
 
-            # Calculate some basic metrics
-            if quality_metrics['code_lines'] > 0:
-                quality_metrics['comment_ratio'] = round(
-                    quality_metrics['comment_lines'] / quality_metrics['code_lines'] * 100, 2)
-            else:
-                quality_metrics['comment_ratio'] = 0
+                # Get similar security patterns
+                similar_patterns = await self.pattern_learner.get_similar_patterns(
+                    "security",
+                    {"file_path": context.metadata["file_path"]},
+                    threshold=0.7
+                )
 
-            # Update Prometheus metrics
-            CODE_COVERAGE.labels(package=package_name).set(
-                quality_metrics['comment_ratio'])
-            CODE_TEST_COUNT.labels(package=package_name).set(
-                len([f for f in os.listdir(repo_path) if f.endswith(
-                    ('test.ts', 'spec.ts', 'test.js', 'spec.js'))])
-            )
-            CODE_COMPLEXITY.labels(package=package_name).set(
-                quality_metrics['code_lines'] /
-                max(quality_metrics['files_analyzed'], 1)
-            )
-
-            return quality_metrics
+                # Apply learned patterns
+                for pattern in similar_patterns:
+                    if pattern.confidence > 0.8:  # High confidence threshold
+                        # Apply pattern-specific checks
+                        if await self._check_security_pattern(node, pattern):
+                            issues.append(
+                                self._create_issue_from_pattern(pattern, context))
 
         except Exception as e:
-            self.logger.error(f"Code quality analysis failed: {str(e)}")
-            return {"error": str(e)}
+            logger.error(f"Security analysis failed: {e}", exc_info=True)
+
+        return issues
+
+    async def _analyze_performance(self, code: str, context: Context) -> List[Dict[str, Any]]:
+        """Analyze code for performance issues"""
+        issues = []
+        try:
+            tree = ast.parse(code)
+
+            # Get similar performance patterns
+            similar_patterns = await self.pattern_learner.get_similar_patterns(
+                "performance",
+                {"file_path": context.metadata["file_path"]},
+                threshold=0.7
+            )
+
+            for node in ast.walk(tree):
+                # Check for nested loops
+                if isinstance(node, (ast.For, ast.While)):
+                    for child in ast.walk(node):
+                        if isinstance(child, (ast.For, ast.While)) and child is not node:
+                            issues.append({
+                                "type": "performance",
+                                "severity": "medium",
+                                "file": context.metadata["file_path"],
+                                "line": node.lineno,
+                                "message": "Nested loop detected - potential performance issue"
+                            })
+                            break
+
+                # Check for large list comprehensions
+                if isinstance(node, ast.ListComp):
+                    if len(list(ast.walk(node))) > 10:
+                        issues.append({
+                            "type": "performance",
+                            "severity": "low",
+                            "file": context.metadata["file_path"],
+                            "line": node.lineno,
+                            "message": "Complex list comprehension - consider breaking down"
+                        })
+
+                # Check for inefficient string concatenation
+                if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                    if isinstance(node.left, ast.Str) or isinstance(node.right, ast.Str):
+                        issues.append({
+                            "type": "performance",
+                            "severity": "low",
+                            "file": context.metadata["file_path"],
+                            "line": node.lineno,
+                            "message": "Inefficient string concatenation - consider using join() or f-strings"
+                        })
+
+                # Apply learned patterns
+                for pattern in similar_patterns:
+                    if pattern.confidence > 0.8:
+                        if await self._check_performance_pattern(node, pattern):
+                            issues.append(
+                                self._create_issue_from_pattern(pattern, context))
+
+            # Check file size
+            self._check_file_size(context, issues)
+
+        except Exception as e:
+            logger.error(f"Performance analysis failed: {e}", exc_info=True)
+
+        return issues
+
+    async def _analyze_maintainability(self, code: str, context: Context) -> List[Dict[str, Any]]:
+        """Analyze code for maintainability issues"""
+        issues = []
+        try:
+            tree = ast.parse(code)
+
+            # Get similar maintainability patterns
+            similar_patterns = await self.pattern_learner.get_similar_patterns(
+                "maintainability",
+                {"file_path": context.metadata["file_path"]},
+                threshold=0.7
+            )
+
+            for node in ast.walk(tree):
+                # Check function complexity
+                if isinstance(node, ast.FunctionDef):
+                    complexity = self._calculate_complexity(node)
+                    if complexity > 10:
+                        issues.append({
+                            "type": "maintainability",
+                            "severity": "medium",
+                            "file": context.metadata["file_path"],
+                            "line": node.lineno,
+                            "message": f"Function '{node.name}' has high cyclomatic complexity ({complexity})"
+                        })
+
+                    # Check function length
+                    if len(node.body) > 50:
+                        issues.append({
+                            "type": "maintainability",
+                            "severity": "medium",
+                            "file": context.metadata["file_path"],
+                            "line": node.lineno,
+                            "message": f"Function '{node.name}' is too long ({len(node.body)} lines)"
+                        })
+
+                    # Check for too many parameters
+                    if len(node.args.args) > 5:
+                        issues.append({
+                            "type": "maintainability",
+                            "severity": "medium",
+                            "file": context.metadata["file_path"],
+                            "line": node.lineno,
+                            "message": f"Function '{node.name}' has too many parameters ({len(node.args.args)})"
+                        })
+
+                    # Check for lack of docstring
+                    if not ast.get_docstring(node):
+                        issues.append({
+                            "type": "maintainability",
+                            "severity": "low",
+                            "file": context.metadata["file_path"],
+                            "line": node.lineno,
+                            "message": f"Function '{node.name}' lacks a docstring"
+                        })
+
+                # Apply learned patterns
+                for pattern in similar_patterns:
+                    if pattern.confidence > 0.8:
+                        if await self._check_maintainability_pattern(node, pattern):
+                            issues.append(
+                                self._create_issue_from_pattern(pattern, context))
+
+            # Check code duplication
+            await self._check_code_duplication(context, issues)
+
+        except Exception as e:
+            logger.error(
+                f"Maintainability analysis failed: {e}", exc_info=True)
+
+        return issues
+
+    async def _analyze_architecture(self, code: str, context: Context) -> List[Dict[str, Any]]:
+        """Analyze code for architectural issues"""
+        issues = []
+        try:
+            tree = ast.parse(code)
+
+            # Get similar architecture patterns
+            similar_patterns = await self.pattern_learner.get_similar_patterns(
+                "architecture",
+                {"file_path": context.metadata["file_path"]},
+                threshold=0.7
+            )
+
+            # Check for circular imports
+            imports = self._extract_imports(tree)
+            if self._detect_circular_imports(context.metadata["file_path"], imports):
+                issues.append({
+                    "type": "architecture",
+                    "severity": "high",
+                    "file": context.metadata["file_path"],
+                    "line": 1,
+                    "message": "Potential circular import detected"
+                })
+
+            # Check for proper layering
+            if not self._check_layering(context.metadata["file_path"]):
+                issues.append({
+                    "type": "architecture",
+                    "severity": "medium",
+                    "file": context.metadata["file_path"],
+                    "line": 1,
+                    "message": "File may violate layering principles"
+                })
+
+            # Apply learned patterns
+            for pattern in similar_patterns:
+                if pattern.confidence > 0.8:
+                    if await self._check_architecture_pattern(context, pattern):
+                        issues.append(
+                            self._create_issue_from_pattern(pattern, context))
+
+        except Exception as e:
+            logger.error(f"Architecture analysis failed: {e}", exc_info=True)
+
+        return issues
+
+    def _calculate_complexity(self, node: ast.AST) -> int:
+        """Calculate cyclomatic complexity of an AST node"""
+        complexity = 1
+        for child in ast.walk(node):
+            if isinstance(child, (ast.If, ast.While, ast.For, ast.ExceptHandler)):
+                complexity += 1
+            elif isinstance(child, ast.BoolOp):
+                complexity += len(child.values) - 1
+        return complexity
+
+    async def _generate_recommendations(
+        self,
+        findings: List[Dict[str, Any]],
+        memories: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Generate recommendations based on findings and past experiences"""
+        recommendations = []
+
+        # Get relevant patterns for recommendations
+        relevant_patterns = []
+        for finding_type in set(f["type"] for f in findings):
+            patterns = await self.pattern_learner.get_similar_patterns(finding_type, {}, threshold=0.8)
+            relevant_patterns.extend(patterns)
+
+        # Group findings by type
+        findings_by_type = {}
+        for finding in findings:
+            findings_by_type.setdefault(finding["type"], []).append(finding)
+
+        # Generate recommendations for each type
+        for finding_type, type_findings in findings_by_type.items():
+            if finding_type == "security":
+                recommendations.extend(await self._generate_security_recommendations(type_findings))
+            elif finding_type == "performance":
+                recommendations.extend(await self._generate_performance_recommendations(type_findings))
+            elif finding_type == "maintainability":
+                recommendations.extend(await self._generate_maintainability_recommendations(type_findings))
+            elif finding_type == "architecture":
+                recommendations.extend(await self._generate_architecture_recommendations(type_findings))
+
+        # Add pattern-based recommendations
+        for pattern in relevant_patterns:
+            if pattern.success_rate > 0.8:  # Only use highly successful patterns
+                recommendations.append({
+                    "type": pattern.pattern_type,
+                    "confidence": pattern.confidence,
+                    "message": f"Based on past experience: {pattern.pattern_data.get('recommendation', '')}"
+                })
+
+        return recommendations
+
+    async def _calculate_metrics(self, findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Calculate metrics based on findings"""
+        return {
+            "total_issues": len(findings),
+            "issues_by_type": {
+                issue_type: len(
+                    [f for f in findings if f["type"] == issue_type])
+                for issue_type in set(f["type"] for f in findings)
+            },
+            "issues_by_severity": {
+                severity: len(
+                    [f for f in findings if f["severity"] == severity])
+                for severity in ["high", "medium", "low"]
+            },
+            "code_quality_score": self._calculate_code_quality_score(findings),
+            "maintainability_index": self._calculate_maintainability_index(),
+            "technical_debt_ratio": self._calculate_technical_debt_ratio(findings),
+            "code_metrics": {
+                "avg_complexity": self.code_metrics["complexity_sum"] / max(self.code_metrics["function_count"], 1),
+                "comment_ratio": self.code_metrics["comment_lines"] / max(self.code_metrics["lines_of_code"], 1),
+                "test_coverage": self.code_metrics["test_coverage"]
+            }
+        }
+
+    def _reset_metrics(self):
+        """Reset code metrics for new analysis"""
+        self.code_metrics = {
+            "lines_of_code": 0,
+            "comment_lines": 0,
+            "complexity_sum": 0,
+            "function_count": 0,
+            "class_count": 0,
+            "test_coverage": 0.0
+        }
+
+    def _update_basic_metrics(self, code: str):
+        """Update basic code metrics"""
+        lines = code.split('\n')
+        self.code_metrics["lines_of_code"] += len(lines)
+
+        # Count comment lines
+        comment_lines = len([l for l in lines if l.strip().startswith('#')])
+        self.code_metrics["comment_lines"] += comment_lines
+
+        try:
+            tree = ast.parse(code)
+
+            # Count functions and classes
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef):
+                    self.code_metrics["function_count"] += 1
+                    self.code_metrics["complexity_sum"] += self._calculate_complexity(
+                        node)
+                elif isinstance(node, ast.ClassDef):
+                    self.code_metrics["class_count"] += 1
+
+        except Exception as e:
+            logger.error(f"Error updating metrics: {e}")
+
+    async def _learn_from_finding(self, finding: Dict[str, Any], context: Context):
+        """Learn from analysis findings"""
+        try:
+            pattern_data = {
+                "type": finding["type"],
+                "severity": finding["severity"],
+                "message": finding["message"],
+                "context": context.metadata
+            }
+
+            await self.pattern_learner.learn_pattern(finding["type"], pattern_data, True)
+        except Exception as e:
+            logger.error(f"Error learning from finding: {e}")
+
+    def _check_file_size(self, context: Context, issues: List[Dict[str, Any]]):
+        """Check if file is too large"""
+        file_size = len(context.content.split('\n'))
+        if file_size > 500:  # Configurable threshold
+            issues.append({
+                "type": "maintainability",
+                "severity": "medium",
+                "file": context.metadata["file_path"],
+                "line": 1,
+                "message": f"File is too large ({file_size} lines)"
+            })
+
+    async def _check_code_duplication(self, context: Context, issues: List[Dict[str, Any]]):
+        """Check for code duplication"""
+        # Simple implementation - can be enhanced with more sophisticated algorithms
+        lines = context.content.split('\n')
+        chunks = {}
+
+        for i in range(len(lines) - 5):  # Look for duplicates of 6+ lines
+            chunk = '\n'.join(lines[i:i+6])
+            if len(chunk.strip()) > 0:
+                if chunk in chunks:
+                    chunks[chunk].append(i+1)
+                else:
+                    chunks[chunk] = [i+1]
+
+        for chunk, locations in chunks.items():
+            if len(locations) > 1:
+                issues.append({
+                    "type": "maintainability",
+                    "severity": "medium",
+                    "file": context.metadata["file_path"],
+                    "line": locations[0],
+                    "message": f"Duplicate code found at lines: {', '.join(map(str, locations))}"
+                })
+
+    async def _check_security_pattern(self, node: ast.AST, pattern: Pattern) -> bool:
+        """Check if node matches a security pattern"""
+        try:
+            if "variable_pattern" in pattern.pattern_data:
+                if isinstance(node, ast.Name):
+                    return bool(re.match(
+                        pattern.pattern_data["variable_pattern"],
+                        node.id
+                    ))
+            if "function_pattern" in pattern.pattern_data:
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name):
+                        return bool(re.match(
+                            pattern.pattern_data["function_pattern"],
+                            node.func.id
+                        ))
+        except Exception as e:
+            logger.error(f"Error checking security pattern: {e}")
+        return False
+
+    async def _check_performance_pattern(self, node: ast.AST, pattern: Pattern) -> bool:
+        """Check if node matches a performance pattern"""
+        try:
+            if "node_type" in pattern.pattern_data:
+                if pattern.pattern_data["node_type"] == node.__class__.__name__:
+                    return True
+            if "complexity_threshold" in pattern.pattern_data:
+                if isinstance(node, ast.FunctionDef):
+                    return self._calculate_complexity(node) > pattern.pattern_data["complexity_threshold"]
+        except Exception as e:
+            logger.error(f"Error checking performance pattern: {e}")
+        return False
+
+    async def _check_maintainability_pattern(self, node: ast.AST, pattern: Pattern) -> bool:
+        """Check if node matches a maintainability pattern"""
+        try:
+            if "max_length" in pattern.pattern_data:
+                if isinstance(node, ast.FunctionDef):
+                    return len(node.body) > pattern.pattern_data["max_length"]
+            if "naming_pattern" in pattern.pattern_data:
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                    return not bool(re.match(
+                        pattern.pattern_data["naming_pattern"],
+                        node.name
+                    ))
+        except Exception as e:
+            logger.error(f"Error checking maintainability pattern: {e}")
+        return False
+
+    async def _check_architecture_pattern(self, context: Context, pattern: Pattern) -> bool:
+        """Check if context matches an architecture pattern"""
+        try:
+            if "file_pattern" in pattern.pattern_data:
+                return bool(re.match(
+                    pattern.pattern_data["file_pattern"],
+                    context.metadata["file_path"]
+                ))
+            if "import_pattern" in pattern.pattern_data:
+                tree = ast.parse(context.content)
+                imports = self._extract_imports(tree)
+                return any(re.match(pattern.pattern_data["import_pattern"], imp) for imp in imports)
+        except Exception as e:
+            logger.error(f"Error checking architecture pattern: {e}")
+        return False

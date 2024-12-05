@@ -1,79 +1,21 @@
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
-  scrape_timeout: 10s
-
-# Rule files for alerting and recording rules
-rule_files:
-  - "rules/alerts.yml"
-  - "rules/recording.yml"
 
 scrape_configs:
-  # Core Services
+  - job_name: 'multi-agent-code-analyzer'
+    static_configs:
+      - targets: ['app:8080']
+    metrics_path: '/metrics'
+
   - job_name: 'prometheus'
     static_configs:
-      - targets: ['prometheus:9090']
-    metrics_path: '/metrics'
+      - targets: ['localhost:9090']
 
-  - job_name: 'code-analyzer'
-    static_configs:
-      - targets: ['app:8000']
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-    relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_label_app]
-        target_label: app
-      - target_label: service
-        replacement: 'code_analyzer'
+alerting:
+  alertmanagers:
+    - static_configs:
+      - targets: ['alertmanager:9093']
 
-  # Infrastructure Services
-  - job_name: 'neo4j'
-    static_configs:
-      - targets: ['neo4j:7474']
-    metrics_path: '/metrics'
-    scrape_interval: 30s
-    relabel_configs:
-      - target_label: service
-        replacement: 'neo4j'
-
-  - job_name: 'redis'
-    static_configs:
-      - targets: ['redis:6379']
-    metrics_path: '/metrics'
-    scrape_interval: 30s
-    relabel_configs:
-      - target_label: service
-        replacement: 'redis'
-
-  - job_name: 'milvus'
-    static_configs:
-      - targets: ['milvus:9091']
-    metrics_path: '/metrics'
-    scrape_interval: 30s
-    relabel_configs:
-      - target_label: service
-        replacement: 'milvus'
-
-  # Performance and Resource Metrics
-  - job_name: 'task_performance'
-    static_configs:
-      - targets: ['app:8000']
-    metrics_path: '/metrics/performance'
-    scrape_interval: 10s
-    metric_relabel_configs:
-      - source_labels: [task_type]
-        target_label: type
-      - target_label: service
-        replacement: 'task_performance'
-
-  # Health and Diagnostics
-  - job_name: 'health'
-    static_configs:
-      - targets: ['app:8000']
-    metrics_path: '/metrics/health'
-    scrape_interval: 10s
-    metric_relabel_configs:
-      - source_labels: [service]
-        target_label: component
-      - target_label: service
-        replacement: 'health'
+rule_files:
+  - "/etc/prometheus/rules/*.yml"

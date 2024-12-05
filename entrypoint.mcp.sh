@@ -19,46 +19,103 @@ check_environment() {
     fi
 }
 
-# Function to wait for Neo4j using Python
+# Enhanced Neo4j connection testing
 wait_for_neo4j() {
     local host="$1"
     local port="$2"
-    local max_attempts="${3:-30}"
-    local wait_time="${4:-2}"
+    local max_attempts="${NEO4J_CONNECTION_RETRY_COUNT:-30}"
+    local retry_delay="${NEO4J_CONNECTION_RETRY_DELAY:-10}"
     
-    echo "Waiting for Neo4j at $host:$port..."
+    echo "=== Neo4j Connection Debug Info ==="
+    echo "Connection details:"
+    echo "URI: $NEO4J_URI"
+    echo "User: $NEO4J_USER"
+    echo "Password hash: $(echo -n "$NEO4J_PASSWORD" | sha256sum)"
+    echo "Max attempts: $max_attempts"
+    echo "Retry delay: $retry_delay seconds"
+    
+    # Initial delay to let Neo4j fully initialize
+    echo "Waiting 30 seconds for Neo4j to initialize..."
+    sleep 30
+    
+    # DNS resolution check
+    echo "=== DNS Resolution Check ==="
+    if ! getent hosts neo4j; then
+        echo "Failed to resolve neo4j hostname"
+        return 1
+    fi
+    
+    # Network connectivity check
+    echo "=== Network Connectivity Check ==="
+    if ! nc -zv neo4j 7687; then
+        echo "Failed to connect to neo4j:7687"
+        return 1
+    fi
+    
+    # Test with Python driver
     for i in $(seq 1 $max_attempts); do
-        echo "Attempt $i - Testing Neo4j connection..."
+        echo "=== Neo4j Connection Test (attempt $i/$max_attempts) ==="
         python3 -c "
+import os, sys, socket, logging, time
 from neo4j import GraphDatabase
-import sys
-import traceback
+
+# Enable debug logging
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger('neo4j').setLevel(logging.DEBUG)
+
+def test_connection(uri, user, password, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            print(f'Connection attempt {attempt + 1}/{max_retries}')
+            print(f'Connecting to {uri}...')
+            
+            driver = GraphDatabase.driver(
+                uri, 
+                auth=(user, password),
+                max_connection_lifetime=5,
+                connection_timeout=10
+            )
+            
+            print('Driver created, verifying connectivity...')
+            driver.verify_connectivity()
+            
+            # Test a simple query
+            with driver.session() as session:
+                result = session.run('RETURN 1 as num')
+                print(f'Test query result: {result.single()[0]}')
+            
+            print('Success!')
+            driver.close()
+            return True
+        except Exception as e:
+            print(f'Attempt {attempt + 1} failed: {type(e).__name__}: {str(e)}')
+            if attempt < max_retries - 1:
+                time.sleep(2)
+            continue
+    return False
 
 try:
-    uri = 'bolt://$host:$port'
-    print(f'Debug: Connecting to Neo4j at {uri}...')
-    driver = GraphDatabase.driver(uri, connection_acquisition_timeout=5)
-    print('Debug: Driver created, testing session...')
-    with driver.session(database='neo4j') as session:
-        print('Debug: Session created, running test query...')
-        result = session.run('MATCH (n) RETURN count(n) as count')
-        value = result.single()['count']
-        print(f'Debug: Query successful, count: {value}')
-    driver.close()
-    sys.exit(0)
+    uri = os.environ['NEO4J_URI']
+    user = os.environ['NEO4J_USER']
+    password = os.environ['NEO4J_PASSWORD']
+    
+    if test_connection(uri, user, password):
+        sys.exit(0)
+    sys.exit(1)
 except Exception as e:
-    print(f'Debug: Connection failed with error: {str(e)}')
-    print('Debug: Full traceback:')
-    traceback.print_exc()
+    print(f'Error: {type(e).__name__}: {str(e)}')
+    print('Full error details:', str(e), file=sys.stderr)
     sys.exit(1)
 "
         if [ $? -eq 0 ]; then
-            echo "Neo4j is ready!"
+            echo "Neo4j connection established"
             return 0
         fi
-        sleep $wait_time
+        echo "Waiting $retry_delay seconds before next attempt..."
+        sleep $retry_delay
     done
-    echo "Timeout waiting for Neo4j"
+    
+    echo "Timeout waiting for Neo4j after $max_attempts attempts"
     return 1
 }
 
@@ -84,10 +141,8 @@ wait_for_redis() {
 
 # Function to setup metrics
 setup_metrics() {
-    if [ "$METRICS_ENABLED" = "true" ]; then
-        echo "Setting up metrics..."
+    if [ "$PROMETHEUS_MULTIPROC_DIR" = "" ]; then
         mkdir -p /app/metrics
-        touch /app/metrics/metrics.prom
         export PROMETHEUS_MULTIPROC_DIR=/app/metrics
     fi
 }
@@ -103,13 +158,14 @@ setup_directories() {
 # Main execution
 echo "Starting service initialization..."
 
+# Check required environment variables
+check_environment NEO4J_URI NEO4J_USER NEO4J_PASSWORD REDIS_HOST REDIS_PORT
+
+echo "Checking system resources..."
+echo "Initializing mcp service..."
+
 # Setup directories and logging
 setup_directories
-
-# Check required environment variables
-check_environment "SERVICE_PORT" "NEO4J_URI" "REDIS_HOST" "REDIS_PORT"
-
-echo "Initializing mcp service..."
 
 # Extract Neo4j host and port from URI
 NEO4J_HOST=$(echo "$NEO4J_URI" | sed -n 's/.*\/\/\([^:]*\).*/\1/p')
@@ -123,12 +179,17 @@ echo "Host: $NEO4J_HOST"
 echo "Port: $NEO4J_PORT"
 echo "URI: $NEO4J_URI"
 
-# Wait for required services
+# Wait for Neo4j
+echo "Environment variables:"
+env | grep -E 'NEO4J|REDIS'
+
+echo "Waiting for Neo4j to be ready..."
 if ! wait_for_neo4j "$NEO4J_HOST" "$NEO4J_PORT"; then
-    echo "ERROR: Failed to establish Neo4j connection"
+    echo "Failed to connect to Neo4j"
     exit 1
 fi
 
+# Wait for Redis
 if ! wait_for_redis "$REDIS_HOST" "$REDIS_PORT"; then
     echo "ERROR: Failed to establish Redis connection"
     exit 1
