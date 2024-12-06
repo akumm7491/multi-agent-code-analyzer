@@ -18,18 +18,49 @@ fi
 # Export the repo path for docker-compose
 export REPO_PATH="$PWD/repo"
 
-# Start the services
-echo "Starting services..."
-docker-compose up -d
+# Check if services are running
+if ! docker-compose ps | grep -q "Up"; then
+    echo "Starting services..."
+    docker-compose up -d
+    echo "Waiting for services to be ready (60s)..."
+    sleep 60
+else
+    echo "Services are already running"
+fi
 
-# Wait for services to be ready
-echo "Waiting for services to be ready..."
-sleep 30
+# Check app health
+echo "Checking application health..."
+MAX_RETRIES=10
+RETRY_COUNT=0
+
+while ! curl -s http://localhost:8000/health > /dev/null; do
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+    if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+        echo "Error: Application not healthy after $MAX_RETRIES attempts"
+        exit 1
+    fi
+    echo "Waiting for application to be healthy... (attempt $RETRY_COUNT/$MAX_RETRIES)"
+    sleep 5
+done
+
+echo "Application is healthy!"
 
 # Start the analysis
 echo "Starting analysis..."
-curl -X POST "http://localhost:8080/analyze" \
+ANALYSIS_RESPONSE=$(curl -s -X POST "http://localhost:8000/analyze" \
     -H "Content-Type: application/json" \
-    -d "{\"repo_path\": \"/app/repo\", \"analysis_type\": \"full\"}"
+    -d "{\"repo_path\": \"/app/repo\", \"analysis_type\": \"full\"}")
 
-echo "Analysis started. You can check the progress at http://localhost:8080/status" 
+echo "Analysis started. Response: $ANALYSIS_RESPONSE"
+echo "You can check the progress at http://localhost:8000/status"
+
+# Monitor analysis status
+echo "Monitoring analysis progress..."
+while true; do
+    STATUS=$(curl -s "http://localhost:8000/status")
+    echo "Current status: $STATUS"
+    if [[ $STATUS == *"completed"* ]] || [[ $STATUS == *"failed"* ]]; then
+        break
+    fi
+    sleep 10
+done 

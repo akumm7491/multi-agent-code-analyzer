@@ -6,7 +6,7 @@ services:
     volumes:
       - ./src:/app/src
       - ./.env:/app/.env
-      - ${REPO_PATH:-./repo}:/app/repo
+      - ${PWD}/repo:/app/repo
     environment:
       - PYTHONPATH=/app
       - SERVICE_NAME=multi-agent-code-analyzer
@@ -17,6 +17,8 @@ services:
       - NEO4J_URI=bolt://neo4j:7687
       - MILVUS_HOST=standalone
       - MILVUS_PORT=19530
+      - MILVUS_USE_STANDALONE=true
+      - MILVUS_STORAGE_TYPE=local
       - INITIALIZE_DB=true
       - RUN_MIGRATIONS=true
       - LOG_LEVEL=info
@@ -34,14 +36,18 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 5s
+      start_period: 40s
     depends_on:
       redis:
         condition: service_healthy
       neo4j:
-        condition: service_started
+        condition: service_healthy
       standalone:
-        condition: service_started
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     networks:
       - maca-network
 
@@ -68,10 +74,11 @@ services:
     volumes:
       - neo4j-data:/data
     healthcheck:
-      test: ['CMD', 'wget', 'http://localhost:7474', '-O', '/dev/null']
+      test: ['CMD-SHELL', 'wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1']
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
     networks:
       - maca-network
 
@@ -91,8 +98,16 @@ services:
       - '19530:19530'
       - '9091:9091'
     depends_on:
-      - 'etcd'
-      - 'minio'
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9091/healthz']
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     networks:
       - maca-network
 
@@ -104,6 +119,12 @@ services:
       - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
     volumes:
       - etcd-data:/bitnami/etcd
+    healthcheck:
+      test: ['CMD', '/opt/bitnami/etcd/bin/etcdctl', 'endpoint', 'health']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - maca-network
 
@@ -118,9 +139,10 @@ services:
     command: server /data --console-address ":9001"
     healthcheck:
       test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
-      interval: 30s
-      timeout: 20s
+      interval: 15s
+      timeout: 10s
       retries: 3
+      start_period: 20s
     networks:
       - maca-network
 
@@ -137,6 +159,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 3
+      start_period: 10s
     networks:
       - maca-network
 
