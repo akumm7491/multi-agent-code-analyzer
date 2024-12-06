@@ -33,7 +33,12 @@ echo "Checking application health..."
 MAX_RETRIES=10
 RETRY_COUNT=0
 
-while ! curl -s http://localhost:8000/health > /dev/null; do
+while true; do
+    if curl -s -f http://localhost:8000/health > /dev/null; then
+        echo "Application is healthy!"
+        break
+    fi
+    
     RETRY_COUNT=$((RETRY_COUNT + 1))
     if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
         echo "Error: Application not healthy after $MAX_RETRIES attempts"
@@ -42,8 +47,6 @@ while ! curl -s http://localhost:8000/health > /dev/null; do
     echo "Waiting for application to be healthy... (attempt $RETRY_COUNT/$MAX_RETRIES)"
     sleep 5
 done
-
-echo "Application is healthy!"
 
 # Start the analysis
 echo "Starting analysis..."
@@ -57,7 +60,7 @@ echo "You can check the progress at http://localhost:8000/status"
 # Monitor analysis status
 echo "Monitoring analysis progress..."
 while true; do
-    STATUS=$(curl -s "http://localhost:8000/status")
+    STATUS=$(curl -s "http://localhost:8000/status?repo_path=/app/repo")
     echo "Current status: $STATUS"
     if [[ $STATUS == *"completed"* ]] || [[ $STATUS == *"failed"* ]]; then
         break

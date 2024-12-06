@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies for development
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn \
+    aiohttp \
+    structlog \
+    python-dotenv \
+    watchfiles \
+    debugpy
+
+# Don't copy source code - it will be mounted
+CMD ["uvicorn", "src.multi_agent_code_analyzer.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"] 

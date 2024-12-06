@@ -1,22 +1,17 @@
-version: '3.8'
-
 services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     ports:
       - '8000:8000'
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=your_secure_redis_password
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=your_secure_password
-      - MILVUS_HOST=standalone
-      - MILVUS_PORT=19530
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - '5678:5678' # For debugpy
+    volumes:
+      - ./src:/app/src
+      - ./requirements.txt:/app/requirements.txt
+      - ./.env:/app/.env
+    env_file:
+      - .env
     depends_on:
       redis:
         condition: service_healthy
@@ -32,27 +27,17 @@ services:
       timeout: 5s
       retries: 5
 
-  test:
-    build:
-      context: .
-      dockerfile: Dockerfile.test
-    environment:
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
-    depends_on:
-      app:
-        condition: service_healthy
-    networks:
-      - maca-network
-
   redis:
     image: redis:7.2
-    command: redis-server --requirepass your_secure_redis_password
+    command: redis-server --requirepass ${REDIS_PASSWORD}
     ports:
       - '6379:6379'
+    volumes:
+      - redis_data:/data
     networks:
       - maca-network
     healthcheck:
-      test: ['CMD', 'redis-cli', '-a', 'your_secure_redis_password', 'ping']
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD}', 'ping']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -60,10 +45,12 @@ services:
   neo4j:
     image: neo4j:5.12
     environment:
-      - NEO4J_AUTH=neo4j/your_secure_password
+      - NEO4J_AUTH=${NEO4J_AUTH}
     ports:
       - '7474:7474'
       - '7687:7687'
+    volumes:
+      - neo4j_data:/data
     networks:
       - maca-network
     healthcheck:
@@ -84,6 +71,8 @@ services:
       - --advertise-client-urls=http://etcd:2379
       - --listen-client-urls=http://0.0.0.0:2379
       - --data-dir=/etcd
+    volumes:
+      - etcd_data:/etcd
     healthcheck:
       test: ['CMD', 'etcdctl', 'endpoint', 'health']
       interval: 10s
@@ -98,6 +87,8 @@ services:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
     command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - minio_data:/minio_data
     healthcheck:
       test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
       interval: 10s
@@ -112,6 +103,8 @@ services:
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
     depends_on:
       - 'etcd'
       - 'minio'
@@ -126,3 +119,10 @@ services:
 networks:
   maca-network:
     driver: bridge
+
+volumes:
+  redis_data:
+  neo4j_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
