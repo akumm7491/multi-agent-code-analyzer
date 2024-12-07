@@ -1,205 +1,148 @@
 import pytest
-import asyncio
-from unittest.mock import Mock, patch
-from ..agents.base_agent import BaseAgent, Memory, AgentState
-from ..agents.code_analyzer import CodeAnalyzerAgent
-from ..agents.developer import DeveloperAgent
-from ..agents.agent_manager import AgentManager, AgentType, AgentTask
-
+from fastapi.testclient import TestClient
+from ..models.agent import AgentType, AgentState
 
 @pytest.fixture
-def agent_manager():
-    return AgentManager()
+def client():
+    from ..main import app
+    return TestClient(app)
 
+def test_create_agent_success(client: TestClient):
+    """Test successful agent creation"""
+    agent_data = {
+        "name": "Test Agent",
+        "type": AgentType.CODE_ANALYZER,
+        "description": "A test agent"
+    }
+    response = client.post("/agents", json=agent_data)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == agent_data["name"]
+    assert data["type"] == agent_data["type"]
+    assert data["description"] == agent_data["description"]
+    assert "id" in data
+    assert "state" in data
+    assert data["state"] == AgentState.IDLE
+    assert "created_at" in data
+    assert "last_active" in data
+    assert data["tasks_completed"] == 0
 
-@pytest.fixture
-def mock_github_service():
-    with patch("multi_agent_code_analyzer.tools.github.GithubService") as mock:
-        yield mock
+def test_create_agent_invalid_name(client: TestClient):
+    """Test agent creation with invalid name"""
+    agent_data = {
+        "name": "",  # Empty name
+        "type": AgentType.CODE_ANALYZER
+    }
+    response = client.post("/agents", json=agent_data)
+    assert response.status_code == 422
+    error = response.json()
+    assert any(e["loc"] == ["body", "name"] for e in error["detail"])
 
+def test_create_agent_invalid_type(client: TestClient):
+    """Test agent creation with invalid type"""
+    agent_data = {
+        "name": "Test Agent",
+        "type": "invalid_type"
+    }
+    response = client.post("/agents", json=agent_data)
+    assert response.status_code == 422
+    error = response.json()
+    assert any(e["loc"] == ["body", "type"] for e in error["detail"])
 
-@pytest.mark.asyncio
-async def test_code_analyzer_agent():
-    """Test CodeAnalyzerAgent functionality"""
-    agent = CodeAnalyzerAgent("test_analyzer")
+def test_list_agents_empty(client: TestClient):
+    """Test listing agents when no agents exist"""
+    response = client.get("/agents")
+    assert response.status_code == 200
+    assert response.json() == []
 
-    # Test repository analysis
-    result = await agent.analyze_repository(
-        "https://github.com/test/repo",
-        "main",
-        "test_token"
-    )
+def test_list_agents_with_data(client: TestClient):
+    """Test listing agents after creating some"""
+    # Create an agent first
+    agent_data = {
+        "name": "Test Agent",
+        "type": AgentType.CODE_ANALYZER
+    }
+    client.post("/agents", json=agent_data)
+    
+    # List agents
+    response = client.get("/agents")
+    assert response.status_code == 200
+    agents = response.json()
+    assert len(agents) == 1
+    assert agents[0]["name"] == agent_data["name"]
 
-    assert "analysis" in result
-    assert "reflection" in result
-    assert "understanding" in result
+def test_get_agent(client: TestClient):
+    """Test getting a specific agent"""
+    # Create an agent first
+    agent_data = {
+        "name": "Test Agent",
+        "type": AgentType.CODE_ANALYZER
+    }
+    create_response = client.post("/agents", json=agent_data)
+    agent_id = create_response.json()["id"]
+    
+    # Get the agent
+    response = client.get(f"/agents/{agent_id}")
+    assert response.status_code == 200
+    agent = response.json()
+    assert agent["id"] == agent_id
+    assert agent["name"] == agent_data["name"]
 
-    # Verify memory storage
-    assert len(agent.memories) > 0
-    assert agent.memories[0].action == "Analyze repository structure and architecture"
+def test_get_agent_not_found(client: TestClient):
+    """Test getting a non-existent agent"""
+    response = client.get("/agents/nonexistent-id")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
 
+def test_update_agent(client: TestClient):
+    """Test updating an agent"""
+    # Create an agent first
+    agent_data = {
+        "name": "Test Agent",
+        "type": AgentType.CODE_ANALYZER
+    }
+    create_response = client.post("/agents", json=agent_data)
+    agent_id = create_response.json()["id"]
+    
+    # Update the agent
+    update_data = {
+        "name": "Updated Agent",
+        "description": "Updated description"
+    }
+    response = client.patch(f"/agents/{agent_id}", json=update_data)
+    assert response.status_code == 200
+    updated_agent = response.json()
+    assert updated_agent["name"] == update_data["name"]
+    assert updated_agent["description"] == update_data["description"]
 
-@pytest.mark.asyncio
-async def test_developer_agent():
-    """Test DeveloperAgent functionality"""
-    agent = DeveloperAgent("test_developer")
+def test_update_agent_not_found(client: TestClient):
+    """Test updating a non-existent agent"""
+    update_data = {"name": "Updated Agent"}
+    response = client.patch("/agents/nonexistent-id", json=update_data)
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
 
-    # Test feature implementation
-    result = await agent.implement_feature(
-        "Add user authentication",
-        {
-            "repo_url": "https://github.com/test/repo",
-            "branch": "main",
-            "access_token": "test_token"
-        }
-    )
+def test_delete_agent(client: TestClient):
+    """Test deleting an agent"""
+    # Create an agent first
+    agent_data = {
+        "name": "Test Agent",
+        "type": AgentType.CODE_ANALYZER
+    }
+    create_response = client.post("/agents", json=agent_data)
+    agent_id = create_response.json()["id"]
+    
+    # Delete the agent
+    response = client.delete(f"/agents/{agent_id}")
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    
+    # Verify the agent is gone
+    get_response = client.get(f"/agents/{agent_id}")
+    assert get_response.status_code == 404
 
-    assert "changes" in result
-    assert "reflection" in result
-    assert "tests" in result
-
-    # Verify test generation
-    assert len(agent.test_cases) > 0
-
-
-@pytest.mark.asyncio
-async def test_agent_manager(agent_manager):
-    """Test AgentManager functionality"""
-    # Test agent spawning
-    agent = await agent_manager.spawn_agent(AgentType.CODE_ANALYZER)
-    assert agent.agent_id in agent_manager.agents
-
-    # Test task assignment
-    task = AgentTask(
-        task_id="test_task",
-        agent_type=AgentType.CODE_ANALYZER,
-        description="Analyze test repository",
-        context={
-            "repo_url": "https://github.com/test/repo",
-            "branch": "main",
-            "access_token": "test_token"
-        }
-    )
-
-    success = await agent_manager.assign_task(task)
-    assert success
-    assert task.task_id in agent_manager.tasks
-
-
-@pytest.mark.asyncio
-async def test_agent_learning():
-    """Test agent learning capabilities"""
-    agent = CodeAnalyzerAgent("test_learner")
-
-    # Simulate some experiences
-    memory1 = Memory(
-        timestamp="2024-01-01T00:00:00",
-        context='{"type": "analysis"}',
-        action="Analyze code patterns",
-        result='{"patterns": ["singleton"]}',
-        reflection="Pattern detection successful"
-    )
-
-    memory2 = Memory(
-        timestamp="2024-01-01T00:01:00",
-        context='{"type": "analysis"}',
-        action="Analyze dependencies",
-        result='{"error": "Missing package.json"}',
-        reflection="Need to check file existence first"
-    )
-
-    agent.memories.extend([memory1, memory2])
-
-    # Test learning process
-    await agent.learn()
-
-    assert "success_patterns" in agent.learning_points
-    assert "failure_patterns" in agent.learning_points
-
-
-@pytest.mark.asyncio
-async def test_end_to_end_workflow(agent_manager, mock_github_service):
-    """Test complete workflow from analysis to implementation"""
-    # 1. Analyze repository
-    analysis_task = AgentTask(
-        task_id="analysis_1",
-        agent_type=AgentType.CODE_ANALYZER,
-        description="Analyze test repository",
-        context={
-            "repo_url": "https://github.com/test/repo",
-            "branch": "main",
-            "access_token": "test_token"
-        }
-    )
-
-    await agent_manager.assign_task(analysis_task)
-    analysis_result = agent_manager.tasks[analysis_task.task_id].result
-
-    # 2. Implement feature based on analysis
-    dev_task = AgentTask(
-        task_id="dev_1",
-        agent_type=AgentType.DEVELOPER,
-        description="Implement user authentication",
-        context={
-            "repo_url": "https://github.com/test/repo",
-            "branch": "feature/auth",
-            "access_token": "test_token",
-            "analysis_result": analysis_result
-        }
-    )
-
-    await agent_manager.assign_task(dev_task)
-    dev_result = agent_manager.tasks[dev_task.task_id].result
-
-    # Verify workflow results
-    assert analysis_task.status == "completed"
-    assert dev_task.status == "completed"
-    assert "pull_request_url" in dev_result
-
-
-@pytest.mark.asyncio
-async def test_error_handling(agent_manager):
-    """Test system error handling"""
-    # Test with invalid agent type
-    with pytest.raises(ValueError):
-        await agent_manager.spawn_agent("invalid_type")
-
-    # Test with invalid task
-    task = AgentTask(
-        task_id="invalid_task",
-        agent_type=AgentType.ARCHITECT,  # Not implemented yet
-        description="Invalid task",
-        context={}
-    )
-
-    success = await agent_manager.assign_task(task)
-    assert not success
-    assert task.status == "failed"
-
-
-@pytest.mark.asyncio
-async def test_concurrent_tasks(agent_manager):
-    """Test handling of concurrent tasks"""
-    tasks = []
-    for i in range(5):
-        task = AgentTask(
-            task_id=f"task_{i}",
-            agent_type=AgentType.CODE_ANALYZER,
-            description=f"Analysis task {i}",
-            context={
-                "repo_url": "https://github.com/test/repo",
-                "branch": "main",
-                "access_token": "test_token"
-            }
-        )
-        tasks.append(task)
-
-    # Execute tasks concurrently
-    results = await asyncio.gather(*[
-        agent_manager.assign_task(task)
-        for task in tasks
-    ])
-
-    # Verify all tasks completed
-    assert all(results)
-    assert len(agent_manager.agents) > 0  # Should have spawned multiple agents
+def test_delete_agent_not_found(client: TestClient):
+    """Test deleting a non-existent agent"""
+    response = client.delete("/agents/nonexistent-id")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
